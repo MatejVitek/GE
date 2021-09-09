@@ -6,6 +6,7 @@
 # SLURM files
 *.sh
 *.slurm
+slurm-*.out
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

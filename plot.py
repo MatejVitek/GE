@@ -111,8 +111,11 @@ class Main:
 				colours = dzip(TRAIN_TEST_DICT, CMAP(np.linspace(0, 1, len(TRAIN_TEST_DICT))))
 				for j, (train, test) in enumerate(TRAIN_TEST):
 					pred_eval, bin_eval = self._results[model][train][test]['overall'][:2]
-					self._save_evals(pred_eval, bin_eval, model, train, test, latex)
+					self._save_evals(pred_eval, bin_eval, f'{model} - {train} - {test}')
+					#self._latexify_evals(pred_eval, bin_eval, model, train, test, latex)
 					bar.plot(bin_eval, i, j, colour=colours[train], label=f"{train}-{test}")
+				for train in TRAIN_TEST_DICT:
+					self._latexify_evals(pred_eval, bin_eval, model, train, latex)
 
 	def _experiment2(self, attr):
 		attr = attr.title()
@@ -161,8 +164,8 @@ class Main:
 		with open(name, 'rb') as f:
 			return pickle.load(f) + pickle.load(f)
 
-	def _save_evals(self, pred_eval, bin_eval, model, train, test, latex=None):
-		save = self.eval_dir/f'{model} - {train} - {test}.txt'
+	def _save_evals(self, pred_eval, bin_eval, name):
+		save = self.eval_dir/f'{name}.txt'
 		print(f"Saving to {save}")
 		with save.open('w', encoding='utf-8') as f:
 			print("Probabilistic", file=f)
@@ -170,9 +173,8 @@ class Main:
 			print(file=f)
 			print("Binarised", file=f)
 			print(bin_eval, file=f)
-		if latex:
-			self._latexify_evals(pred_eval, bin_eval, model, train, test, latex)
 
+	'''
 	def _latexify_evals(self, pred_eval, bin_eval, model, train, test, latex):
 		if (train, test) == TRAIN_TEST[0]:  # First line of model
 			latex.write(fr"\multirow{{{len(TRAIN_TEST)}}}{{*}}{{{model}}}")
@@ -186,12 +188,26 @@ class Main:
 				if test == TRAIN_TEST_DICT[train][0]:  # First line of model+train
 					mean = np.mean([self._results[model][train][t]['overall'][pb_eval is bin_eval][metric].mean for t in TRAIN_TEST_DICT[train]])
 					latex.write(fr" \multirow{{{len(TRAIN_TEST_DICT[train])}}}{{*}}{{{fmt(mean)}}}")
-		latex.write(" \\\\")
+		latex.write(r" \\")
 		if test == TRAIN_TEST_DICT[train][-1] and train != list(TRAIN_TEST_DICT)[-1]:  # Last line of model+train but not of model
 			latex.write(r"\cmidrule(lr){2-15}")
-		elif train == list(TRAIN_TEST_DICT)[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
+		elif (train, test) == TRAIN_TEST[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
-		print(file=latex)
+		latex.write("\n")
+	'''
+
+	def _latexify_evals(self, pred_eval, bin_eval, model, train, latex):
+		if train == list(TRAIN_TEST_DICT)[0]:  # First line of model
+			latex.write(fr"\multirow{{{len(TRAIN_TEST_DICT)}}}{{*}}{{{model}}} & {train} ")
+		else:
+			latex.write(f" & {train.ljust(max(map(len, list(TRAIN_TEST_DICT)[1:])))} ")
+		for pb_eval, metrics in ((bin_eval, ('F1-score', 'Precision', 'Recall', 'IoU')), (pred_eval, ('F1-score', 'AUC'))):
+			for metric in metrics:
+				latex.write(f"& {fmt(np.mean([self._results[model][train][test]['overall'][pb_eval is bin_eval][metric].mean for test in TRAIN_TEST_DICT[train]]))} ")
+		latex.write(r"\\")
+		if train == list(TRAIN_TEST_DICT)[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
+			latex.write(r"\hline")
+		latex.write("\n")
 
 	def _compute_biases(self, pb_evals, n_samples=None):
 		# By default both stratified (with 100 samples per group) and non-stratified experiments will be run
@@ -223,27 +239,27 @@ class Main:
 		return bias
 
 	def _save_biases(self, bias, name):
-		for strat, name in enumerate((name, f'{name} - Stratified')):
-			save = self.eval_dir/f'Bias - {name}.txt'
-			print(f"Saving to {save}")
-			with save.open('w', encoding='utf-8') as f:
-				for i, pb in enumerate(("Probabilistic", "Binarised")):
-					print(pb, file=f)
-					for name, score in bias[strat][i].items():
-						print(f"{name}: {score}", file=f)
+		save = self.eval_dir/f'Bias - {name}.txt'
+		print(f"Saving to {save}")
+		with save.open('w', encoding='utf-8') as f:
+			for i, pb in enumerate(("Probabilistic", "Binarised")):
+				for s, strat in enumerate(("Total", "Stratified")):
+					print(f"{pb} ({strat})", file=f)
+					for metric, score in bias[s][i].items():
+						print(f"{metric}: {score}", file=f)
 					print(file=f)
 
 	def _latexify_biases(self, bias, model, train, latex, train_datasets=TRAIN_DATASETS):
 		if train == train_datasets[0]:  # First line of model
 			latex.write(fr"\multirow{{{len(train_datasets)}}}{{*}}{{{model}}}")
-		latex.write(f" & {train if train == train_datasets[0] else train.ljust(max(map(len, train_datasets)))}")
+		latex.write(f" & {train if train == train_datasets[0] else train.ljust(max(map(len, train_datasets[1:])))}")
 		for pb in (1, 0):  # 1 = probabilistic, 0 = binarised
 			for metric in ('σ', 'MAD', 'Fisher', 'Vito'):
 				latex.write("".join(f" & ${fmt(bias[strat][pb][metric])}$" for strat in (False, True)))
-		latex.write(" \\\\")
+		latex.write(r" \\")
 		if train == train_datasets[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
-		print(file=latex)
+		latex.write("\n")
 
 	def process_command_line_options(self):
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
