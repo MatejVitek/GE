@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 from ast import literal_eval
-from matej.collections import DotDict, ensure_iterable
+from matej.collections import DotDict, dzip, lmap
 from matej import make_module_callable
 from matej.parallel import tqdm_joblib
 import argparse
@@ -17,8 +17,9 @@ from tqdm import tqdm
 # Import whatever else is needed
 from data.sets import MOBIUS, SMD, SLD
 from evaluation.segmentation import *
-import itertools
+import itertools as it
 import numpy as np
+import operator as op
 import pickle
 from PIL import Image
 from scipy.interpolate import interp1d
@@ -26,14 +27,8 @@ import sklearn.metrics as skmetrics
 
 
 # Constants
-#ATTR_EXP = 'light', 'phone', ('light', 'phone'), 'gaze'
-ATTR_EXP = 'colour',
-ATTR_DATASETS = {'MOBIUS'}
 TRAIN_DATASETS = 'All', 'MASD+SBVPI', 'MASD+SMD', 'SBVPI', 'SMD'
 TEST_DATASETS = {ds.__name__: ds for ds in (MOBIUS, SLD, SMD)}
-
-# Auxiliary stuff
-dict_product = lambda d: (dict(zip(d, x)) for x in itertools.product(*d.values()))  # {a: [1, 2], b: [3, 4]} -> [{a: 1, b: 3}, {a: 1, b: 4}, {a: 2, b: 3}, {a: 2, b: 4}]
 
 
 class Main:
@@ -43,8 +38,6 @@ class Main:
 		self.models = Path(args[0] if len(args) > 0 else kw.get('root', root/'Models'))
 		self.gt = Path(args[1] if len(args) > 1 else kw.get('gt', root/'GT'))
 		self.resize = kw.get('resize', (480, 360))
-		self.k = kw.get('k', 0)
-		#self.reread = kw.get('reread', True)
 
 		# Extra keyword arguments
 		self.extra = DotDict(**kw)
@@ -65,60 +58,72 @@ class Main:
 		for name, dataset in datasets.items():
 			dataset.shuffle()
 			with tqdm_joblib(tqdm(desc=f"Reading GT from {name}", total=len(dataset))):
-				gts[name] = dict(Parallel(n_jobs=-1)(
+				gts[name] = dzip(dataset, Parallel(n_jobs=-1)(
 					delayed(self._load_gt)(gt_sample)
 					for gt_sample in dataset
 				))
 
-		for self._model in self.models.iterdir():
-			for self._train, self._test in itertools.product(TRAIN_DATASETS, TEST_DATASETS):
-				self._predictions = self._model/self._train/self._test/'Predictions'
-				self._binarised = self._model/self._train/self._test/'Binarised'
-				if not self._predictions.is_dir():
-					raise ValueError(f"{self._predictions} is not a directory.")
-				if not self._binarised.is_dir():
-					raise ValueError(f"{self._binarised} is not a directory.")
+		models = list(self.models.iterdir())
+		with tqdm(models, desc="Evaluating models") as model_pbar:
+			for self._model in model_pbar:
+				model_pbar.set_postfix(model=self._model.name)
+				model_leave = self._model == models[-1]
 
-				# Check if all pickles already exist
-				flat_attrs = tuple()
-				for attr in ATTR_EXP:
-					try:
-						flat_attrs += attr
-					except TypeError:
-						flat_attrs += attr,
-				all_names = [f'{self._train}_{self._test}']
-				if self._test in ATTR_DATASETS:
-					unique_attr_values = {attr: {getattr(sample, attr) for sample in datasets[self._test]} for attr in set(flat_attrs)}
-					exp_attr_values = [{attr: unique_attr_values[attr] for attr in ensure_iterable(attrs, True)} for attrs in ATTR_EXP]
-					all_names.extend(
-						all_names[0] + '_' + ', '.join(f'{attr.title()}={val.title()}' for attr, val in current_values.items())
-						for current_exp in exp_attr_values
-						for current_values in dict_product(current_exp)
-					)
-				if not self.extra.get('overwrite', False) and all((self._model/f'Pickles/{name}.pkl').is_file() for name in all_names):
-					print(f"All pickles already exist, skipping {self._model.name} trained on {self._train} and tested on {self._test}")
-					continue
+				tt_configs = list(it.product(TRAIN_DATASETS, TEST_DATASETS))
+				with tqdm(tt_configs, desc="On train/test configuration", leave=model_leave) as data_pbar:
+					for self._train, self._test in data_pbar:
+						data_pbar.set_postfix(train=self._train, test=self._test)
+						data_leave = model_leave and (self._train, self._test) == tt_configs[-1]
 
-				print(f"Evaluating model {self._model.name} trained on {self._train} and tested on {self._test}")
-				with tqdm_joblib(tqdm(desc="Reading predictions", total=len(datasets[self._test]))):
-					pred_bin = dict(Parallel(n_jobs=-1)(
-						delayed(self._read_image)(gt_sample)
-						for gt_sample in datasets[self._test]
-					))
-				# This will filter out non-existing predictions, so the code will still work, but missing predictions should be addressed (otherwise evaluation is unfair)
-				pred_bin_gt = {gt_sample: (*pred_bin[gt_sample], gts[self._test][gt_sample]) for gt_sample in datasets[self._test] if pred_bin[gt_sample] is not None}
+						self._predictions = self._model/self._train/self._test/'Predictions'
+						self._binarised = self._model/self._train/self._test/'Binarised'
+						save_f = self._model/f'Pickles/{self._train}_{self._test}.pkl'
+						# Check if pickle already exists
+						if not self.extra.get('overwrite', False) and save_f.is_file():
+							continue
+						save_f.parent.mkdir(parents=True, exist_ok=True)
+						if not self._predictions.is_dir():
+							raise ValueError(f"{self._predictions} is not a directory.")
+						if not self._binarised.is_dir():
+							raise ValueError(f"{self._binarised} is not a directory.")
 
-				# Overall
-				self._experiment1(pred_bin_gt)
+						# Read predictions
+						with tqdm_joblib(tqdm(datasets[self._test], desc="Reading predictions", leave=data_leave)) as data:
+							pred_bin = dzip(datasets[self._test], Parallel(n_jobs=-1)(
+								delayed(self._read_image)(gt_sample)
+								for gt_sample in data
+							))
+						# This will filter out non-existing predictions, so the code will still work, but missing predictions should be addressed (otherwise evaluation is unfair)
+						pred_bin_gt = {sample: (*pred_bin[sample], gts[self._test][sample]) for sample in datasets[self._test] if pred_bin[sample] is not None}
 
-				# Split by eye colour
-				if self._test in ATTR_DATASETS:
-					for attrs in ATTR_EXP:
-						self._experiment2(pred_bin_gt, attrs)
+						# Evaluate predictions against the ground truths
+						with tqdm_joblib(tqdm(list(pred_bin_gt.values()), desc="Computing metrics", leave=data_leave)) as data:
+							evals_and_plots = Parallel(n_jobs=-1)(
+								delayed(self._evaluate_and_plot)(pred, bin_, gt)
+								for pred, bin_, gt in data
+							)
+
+						evals = {pb: {metric: np.array([ep[pb][metric].mean for ep in evals_and_plots]) for metric in evals_and_plots[0][pb].keys()} for pb in range(2)}
+						plots = lmap(op.itemgetter(2), evals_and_plots)
+						mean_plot = Plot.mean_and_std(plots, self.threshold)
+
+						# Save results to pickle file
+						with open(save_f, 'wb') as f:
+							pickle.dump(list(pred_bin_gt.keys()), f)
+							pickle.dump(evals, f)
+							pickle.dump(plots, f)
+							pickle.dump(mean_plot, f)
+
+	def _open_img(self, f, convert=None):
+		img = Image.open(f)
+		if self.resize:
+			img = img.resize(self.resize)
+		if convert:
+			img = img.convert(convert)
+		return img
 
 	def _load_gt(self, gt_sample):
-		gt = np.array((Image.open(gt_sample.f) if self.resize is None else Image.open(gt_sample.f).resize(self.resize)).convert('1'), dtype=np.bool_).flatten()
-		return gt_sample, gt
+		return np.array(self._open_img(gt_sample.f, '1'), dtype=np.bool_).flatten()
 
 	def _read_image(self, gt_sample):
 		pred_f = self._predictions/gt_sample.f.relative_to(self.gt/self._test)
@@ -130,7 +135,7 @@ class Main:
 					break
 			else:
 				print(f"Missing prediction file {pred_f}.", file=sys.stderr)
-				return gt_sample, None
+				return None
 		if not bin_f.is_file():
 			for ext in '.jpg', '.jpeg', '.png':
 				bin_f = bin_f.with_suffix(ext)
@@ -138,74 +143,13 @@ class Main:
 					break
 			else:
 				print(f"Missing binarised file {bin_f}.", file=sys.stderr)
-				return gt_sample, None
-
-		pred = np.array((Image.open(pred_f) if self.resize is None else Image.open(pred_f).resize(self.resize)).convert('L')).flatten() / 255
-		bin_ = np.array((Image.open(bin_f) if self.resize is None else Image.open(bin_f).resize(self.resize)).convert('1'), dtype=np.bool_).flatten()
-		return gt_sample, (pred, bin_)
-
-	def _experiment1(self, pred_bin_gt):
-		print("Experiment 1: Overall performance")
-		self._compute(pred_bin_gt.values(), f'{self._train}_{self._test}')
-
-	def _experiment2(self, pred_bin_gt, attrs):
-		attrs = ensure_iterable(attrs, True)
-		print(f"Experiment 2: Performance across different {', '.join(attr + 's' for attr in attrs)}")
-		values = {attr: {getattr(sample, attr) for sample in pred_bin_gt} for attr in attrs}
-		
-		for current_values in dict_product(values):
-			current_name = f'{self._train}_{self._test}_{", ".join(attr.title() + "=" + val.title() for attr, val in current_values.items())}'
-			data = (pbg for sample, pbg in pred_bin_gt.items() if all(getattr(sample, attr) == val for attr, val in current_values.items()))
-			self._compute(data, current_name)
-
-	def _compute(self, data, save):
-		save = self._model/f'Pickles/{save}.pkl'
-		if not self.extra.get('overwrite', False) and save.is_file():
-			print(f"{save} already exists, skipping computation.")
-			return
-		save.parent.mkdir(parents=True, exist_ok=True)
-		if (eval_plt := self._evaluate_and_plot(list(data))) is None:
-			return
-		mean_std = Plot.mean_and_std(eval_plt[2], self.threshold)
-		print(f"Saving data to {save}")
-		with open(save, 'wb') as f:
-			pickle.dump(eval_plt, f)
-			pickle.dump(mean_std, f)
-
-	def _evaluate_and_plot(self, pred_bin_gt):
-		if self.k:
-			if self.k > len(pred_bin_gt):
-				print(f"Not enough images ({len(pred_bin_gt)}) to split into {self.k} folds.")
 				return None
-			pred_bin_gt = np.array_split(pred_bin_gt, self.k)
-			pred_bin_gt = [[np.concatenate([pbg[i] for pbg in fold]) for i in range(3)] for fold in pred_bin_gt]  # Combine predictions of all images in a single fold
 
-		# When RunningStats is properly thread-safe, we can use this code. Until then we need to use the below one.
-		# pred_eval = BinaryIntensitySegmentationEvaluation(max_cache_size=5000, parallel='multiprocessing')
-		# bin_eval = BinarySegmentationEvaluation(max_cache_size=5000, parallel='multiprocessing')
-		# with tqdm_joblib(tqdm(desc="Computing metrics", total=len(pred_bin_gt))):
-		# 	plots = Parallel(n_jobs=(self.k if self.k else -1))(
-		# 		delayed(self._evaluate_and_plot_single)(pred, bin_, gt, pred_eval, bin_eval)
-		# 		for pred, bin_, gt in pred_bin_gt
-		# 	)
+		pred = np.array(self._open_img(pred_f, 'L')).flatten() / 255
+		bin_ = np.array(self._open_img(bin_f, '1'), dtype=np.bool_).flatten()
+		return pred, bin_
 
-		with tqdm_joblib(tqdm(desc="Computing metrics", total=len(pred_bin_gt))):
-			pred_evals, bin_evals, plots = zip(*Parallel(n_jobs=(self.k if self.k else -1))(
-				delayed(self._evaluate_and_plot_single)(pred, bin_, gt)
-				for pred, bin_, gt in pred_bin_gt
-			))
-		pred_eval = BinaryIntensitySegmentationEvaluation(max_cache_size=5000)
-		bin_eval = BinarySegmentationEvaluation(max_cache_size=5000)
-		for p in pred_evals:
-			for metric in p.metrics:
-				pred_eval[metric.name].update(metric.mean)
-		for b in bin_evals:
-			for metric in b.metrics:
-				bin_eval[metric.name].update(metric.mean)
-
-		return pred_eval, bin_eval, plots
-
-	def _evaluate_and_plot_single(self, pred, bin_, gt):
+	def _evaluate_and_plot(self, pred, bin_, gt):
 		pred_eval = BinaryIntensitySegmentationEvaluation()
 		bin_eval = BinarySegmentationEvaluation()
 
@@ -217,8 +161,8 @@ class Main:
 			bin_ = bin_.copy()
 			bin_[0] = 1
 
-		with np.errstate(invalid='ignore', divide='ignore'):  # Division by zero is handled below
-			# P/R curve of probabilistic prediction
+		with np.errstate(invalid='ignore', divide='ignore'):  # Ignore division by zero as it's handled below
+			# Compute P/R curve of probabilistic prediction
 			precisions, recalls, thresholds = skmetrics.precision_recall_curve(gt, pred)
 		thresholds = np.append(thresholds, 1.)
 
@@ -237,7 +181,6 @@ class Main:
 			recalls = np.delete(recalls, to_delete)
 			precisions = np.delete(precisions, to_delete)
 			thresholds = np.delete(thresholds, to_delete)
-
 		# Find threshold with the best F1-score and update scores at this index
 		f1scores = 2 * precisions * recalls / (precisions + recalls)
 		idx = f1scores.argmax()
@@ -250,7 +193,7 @@ class Main:
 		pred_eval.auc.compute_and_update(precisions=precisions, recalls=recalls)
 
 		# Binarised prediction
-		for metric in bin_eval.metrics:
+		for metric in bin_eval:
 			metric.compute_and_update(gt, bin_)
 
 		plot = Plot(
@@ -267,12 +210,9 @@ class Main:
 	def process_command_line_options(self):
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
 		ap.add_argument('models', type=Path, nargs='?', default=self.models,
-		                help="directory with all model predictions. Should contain a separate folder for each model with 'Predictions' and 'Binarised' inside.")
+		                help="directory with all model predictions - should contain a separate folder for each model with 'Predictions' and 'Binarised' inside")
 		ap.add_argument('gt', type=Path, nargs='?', default=self.gt, help="directory with ground truth masks")
-		ap.add_argument('-d', '--dataset', type=str.lower, choices=('mobius', 'sbvpi', 'none'), help="dataset file naming protocol used")
-		ap.add_argument('-k', type=int, help="number of folds to perform (if 0, each image will be its own fold)")
 		ap.add_argument('-r', '--resize', type=int, nargs=2, help="width and height to resize the images to")
-		#ap.add_argument('--reread', action='store_true', help="reread predictions each fold (takes longer but uses less memory)")
 		ap.parse_known_args(namespace=self)
 
 		ap = argparse.ArgumentParser(description="Extra keyword arguments.")
@@ -337,7 +277,7 @@ class Plot:
 		idx = np.array([f1(precision=p, recall=r) for p, r in zip(mean, interp)]).argmax()
 
 		return (
-			Plot(interp, mean, (interp[idx], mean[idx]), bin_points.mean(0)),  # mean
+			Plot(interp, mean, f1_point=(interp[idx], mean[idx]), bin_point=bin_points.mean(0)),  # mean
 			Plot(interp, mean - std),  # lower std
 			Plot(interp, mean + std)   # upper std
 		)
@@ -382,13 +322,6 @@ class GUI(Tk):
 		self.height_txt = Entry(self.frame, width=10)
 		self.height_txt.insert(END, self.args.resize[1])
 		self.height_txt.grid(column=3, row=row)
-
-		row += 1
-		self.k_lbl = Label(self.frame, text="Folds:")
-		self.k_lbl.grid(column=0, row=row, sticky='w')
-		self.k_var = IntVar(value=self.args.k)
-		self.k_spin = Spinbox(self.frame, from_=1, to=20, textvariable=self.k_var)
-		self.k_spin.grid(column=1, row=row)
 
 		row += 1
 		self.chk_frame = Frame(self.frame)
@@ -439,7 +372,6 @@ class GUI(Tk):
 		self.args.models = Path(self.models_txt.get())
 		self.args.gt = Path(self.gt_txt.get())
 		self.args.resize = (int(self.width_txt.get()), int(self.height_txt.get())) if self.width_txt.get() and self.height_txt.get() else None
-		self.args.k = self.k_var.get()
 		self.args.extra.overwrite = self.overwrite_var.get()
 
 		for kw in self.extra_frame.pairs:
