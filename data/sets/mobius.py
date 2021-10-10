@@ -1,16 +1,17 @@
-from enum import Enum
+from enum import auto
+from matej.collections import OrderedEnum
 from pathlib import Path
 
 from . import Dataset, Sample, Direction as Dir
 
 
-class Phone(Enum):
-	XPERIA = 1
-	IPHONE = 2
-	XIAOMI = 3
+class Phone(OrderedEnum):
+	XPERIA = auto()
+	IPHONE = auto()
+	XIAOMI = auto()
 
 
-class Light(Enum):
+class Light(OrderedEnum):
 	NATURAL = 'n'
 	INDOOR = 'i'
 	POOR = 'p'
