@@ -83,7 +83,7 @@ class Main:
 		self.fig_dir.mkdir(parents=True, exist_ok=True)
 		
 		#plt.rcParams['font.family'] = 'Times New Roman'  # This doesn't work without MS fonts installed
-		plt.rcParams['font.family'] = 'serif'
+		plt.rcParams['font.family'] = 'Serif'
 		plt.rcParams['font.serif'] = 'Times New Roman'
 		plt.rcParams['font.weight'] = 'normal'
 		plt.rcParams['font.size'] = 24
@@ -198,7 +198,7 @@ class Main:
 			for metric in metrics:
 				latex.write(f"& {fmt(mean_std[not bp][metric][0])} & ")
 				if test == tests[0]:  # First line of model
-					latex.write(f"{fmt(hmean[not bp][metric])} ")
+					latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{fmt(hmean[not bp][metric])}}} ")
 		latex.write(r"\\")
 		if test == tests[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
