@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from ast import literal_eval
 from matej import make_module_callable
-from matej.collections import DotDict, dzip, ensure_iterable, lmap, shuffle, treedict
+from matej.collections import DotDict, dzip, ensure_iterable, flatten, lmap, shuffled, treedict
 import argparse
 from tkinter import *
 import tkinter.filedialog as filedialog
@@ -16,7 +16,7 @@ from compute import TRAIN_DATASETS, TEST_DATASETS, Plot  # Plot is needed for pi
 from abc import ABC, abstractmethod
 from evaluation.segmentation import *
 from evaluation import def_tick_format
-import itertools
+import itertools as it
 import logging
 import math
 import matplotlib.pyplot as plt
@@ -37,6 +37,7 @@ from statistics import harmonic_mean
 ATTR_EXP = 'colour', 'light', 'phone', ('light', 'phone'), 'gaze'  # What to run attribute-based bias experiments on
 FIG_EXTS = 'pdf',# 'png', 'svg', 'eps'  # Which formats to save figures to
 CMAP = plt.cm.plasma  # Colourmap to use in figures
+MARKERS = 'osP*Xv^<>p1234'
 ZOOMED_LIMS = .6, .95  # Axis limits of zoomed-in P/R curves
 model_complexity = {
 	'cgans2020cl': (11.5e6, None),
@@ -54,6 +55,7 @@ TRAIN_TEST = [(train, test) for train, tests in TRAIN_TEST_DICT.items() for test
 FIG_EXTS = ensure_iterable(FIG_EXTS, True)
 colourise = lambda x: zip(x, CMAP(np.linspace(0, 1, len(x))))
 fmt = lambda x: np.format_float_positional(x, precision=3, unique=False)
+dict_product = lambda d: (dzip(d, x) for x in it.product(*d.values()))  # {a: [1, 2], b: [3, 4]} --> [{a: 1, b: 3}, {a: 1, b: 4}, {a: 2, b: 3}, {a: 2, b: 4}]
 logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'PostScript backend' not in record.getMessage())  # Suppress matplotlib warnings about .eps transparency
 
 
@@ -83,8 +85,8 @@ class Main:
 		self.fig_dir.mkdir(parents=True, exist_ok=True)
 		
 		#plt.rcParams['font.family'] = 'Times New Roman'  # This doesn't work without MS fonts installed
-		plt.rcParams['font.family'] = 'Serif'
-		plt.rcParams['font.serif'] = 'Times New Roman'
+		plt.rcParams['font.family'] = ['serif']
+		plt.rcParams['font.serif'] = ['Times New Roman']
 		plt.rcParams['font.weight'] = 'normal'
 		plt.rcParams['font.size'] = 24
 
@@ -134,9 +136,9 @@ class Main:
 
 		# Plot overall performances to bar plot and P/R curves
 		with Bar('Overall', self.fig_dir, self._sorted_models, len(tests)) as bar:
-			for i, (test, t_colour) in enumerate(colourise(tests)):
+			for i, (test, bar_colour) in enumerate(colourise(tests)):
 				with ROC(test, self.fig_dir) as roc:
-					for j, (model, m_colour) in enumerate(colourise(self._sorted_models)):
+					for j, (model, roc_colour) in enumerate(colourise(self._sorted_models)):
 						mean_plot, lower_std, upper_std = self._mean_plots[model]['All'][test]
 
 						# Compute k-fold std
@@ -145,21 +147,50 @@ class Main:
 						folds = np.array_split(results, self.k)
 						std = np.std(lmap(np.mean, folds))
 
-						bar.plot(results.mean(), j, i, std=std, label=test, colour=t_colour)
-						#roc.plot(mean_plot, lower_std, upper_std, label=model, colour=m_colour)
-						roc.plot(mean_plot, label=model, colour=m_colour)
+						bar.plot(results.mean(), j, i, std=std, label=test, colour=bar_colour)
+						#roc.plot(mean_plot, lower_std, upper_std, label=model, colour=roc_colour)
+						roc.plot(mean_plot, label=model, colour=roc_colour)
 
-	def _experiment2(self, attr):
-		attr = attr.title()
-		print(f"Experiment 2: Bias across different {attr}s")
-		with (self.eval_dir/'LaTeX - Bias - Colour.txt').open('w', encoding='utf-8') as latex:
+	def _experiment2(self, attrs):
+		attrs = ensure_iterable(attrs, True)
+		name = ", ".join(f"{attr.title()}s" for attr in attrs)
+		print(f"Experiment 2: Bias across different {name}")
+
+		# Compute, save, and latexify biases
+		bias = treedict()
+		with (self.eval_dir/f'LaTeX - Bias - {name}.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
-				for train, test in TRAIN_TEST:
-					if attr not in self._results[model][train][test]:
-						continue
-					bias = self._compute_biases(self._results[model][train][test][attr].values())
-					self._save_biases(bias, f'{model} - {train} - {attr}')
-					self._latexify_biases(bias, model, train, latex)
+				for train in TRAIN_TEST_DICT:
+					samples = self._samples[model][train]['MOBIUS']
+					f1scores = self._results[model][train]['MOBIUS'][1]['F1-score']
+					possible_values = {attr: {getattr(sample, attr) for sample in samples} for attr in attrs}
+					groups = [  # List of 1D arrays. Each 1D array contains per-image F1s for a specific attribute value combination (such as light=natural, phone=iPhone)
+						f1scores[[i for i, sample in enumerate(samples) if all(getattr(sample, attr) == current_values[attr] for attr in attrs)]]
+						for current_values in dict_product(possible_values)
+					]
+
+					bias[model][train] = self._compute_biases(groups)
+					self._save_biases(bias[model][train], f'{model} - {train} - {name}')
+					self._latexify_biases(bias[model][train], model, train, latex)
+
+		# Plot biases
+		metrics = next(iter(next(iter(bias.values())).values()))[0]
+		for strat in range(2):
+			fig_name = name + (" (Stratified)" if strat else "")
+			with Bar(f'Bias across {fig_name}', self.fig_dir, self._sorted_models, len(metrics)) as bar:
+				for i, (metric, bar_colour) in enumerate(colourise(metrics)):
+					max_bias = {metric: max(bias[model]['All'][strat][metric] for model in self._sorted_models) for metric in metrics}
+					with Scatter(f'Bias ({metric}) across {fig_name}', self.fig_dir) as scatter, \
+					     Scatter(f'Bias ({metric}) and Size across {fig_name}', self.fig_dir, xscale='log') as size:
+						for j, ((model, sc_colour), marker) in enumerate(zip(colourise(self._sorted_models), MARKERS)):
+							f1 = self._results[model]['All']['MOBIUS'][1]['F1-score'].mean()
+							b = bias[model]['All'][strat][metric]
+							if metric not in ('σ', 'MAD'):
+								b = b / max_bias[metric] * max(max_bias['σ'], max_bias['MAD'])  # Normalise bias if not σ or MAD
+
+							bar.plot(b, j, i, label=metric, colour=bar_colour)
+							scatter.plot(f1, b, label=model, colour=sc_colour, marker=marker)
+							size.plot(model_complexity[model.lower()][0], f1, 300*b, label=model, colour=sc_colour, marker=marker)
 
 	def _experiment3(self):
 		print("Experiment 3: Bias across different evaluation datasets")
@@ -191,45 +222,38 @@ class Main:
 
 	def _latexify_evals(self, mean_std, hmean, model, test, tests, latex):
 		if test == tests[0]:  # First line of model
-			latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{model}}} & {test} ")
-		else:
-			latex.write(f" & {test.ljust(max(map(len, tests[1:])))} ")
+			latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{model}}}")
+		latex.write(f" & {tests if test == tests[0] else test.ljust(max(map(len, tests[1:])))}")
 		for bp, metrics in enumerate((('F1-score', 'Precision', 'Recall', 'IoU'), ('F1-score', 'AUC'))):
 			for metric in metrics:
-				latex.write(f"& {fmt(mean_std[not bp][metric][0])} & ")
+				latex.write(f" & {fmt(mean_std[not bp][metric][0])} & ")
 				if test == tests[0]:  # First line of model
-					latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{fmt(hmean[not bp][metric])}}} ")
-		latex.write(r"\\")
+					latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{fmt(hmean[not bp][metric])}}}")
+		latex.write(r" \\")
 		if test == tests[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
 		latex.write("\n")
 
-	def _compute_biases(self, pb_evals, n_samples=None):
+	def _compute_biases(self, groups, n_samples=None):
 		# By default both stratified (with 100 samples per group) and non-stratified experiments will be run
 		if n_samples is None:
-			bias = self._compute_biases(pb_evals, 100)
+			bias = self._compute_biases(groups, 100)
 			n_samples = 0
 		else:
-			bias = treedict()
+			bias = [{}, {}]
 
-		for pb in range(2):
-			groups = [pb_eval[pb].f1score.last('all') for pb_eval in pb_evals]  # 2D list of per-image F1s across different groups
-			total_eval = iter(shuffle(list(itertools.chain.from_iterable(groups))))  # 1D list (actually iterator) of all per-image F1s
-			if n_samples:
-				groups = [sample(group, n_samples) for group in groups]  # 2D list of per-image F1s across stratified groups
-				group_means = np.array(lmap(np.mean, groups))  # 1D array of per-stratified-group mean F1s
-				group_stds = np.array(lmap(np.std, groups))  # 1D array of per-stratified-group σ of F1
-			else:
-				group_means = np.array([pb_eval[pb].f1score.mean for pb_eval in pb_evals])  # 1D array of per-group mean F1s
-				group_stds = np.array([pb_eval[pb].f1score.std for pb_eval in pb_evals])  # 1D array of per-group σ of F1
-			control_groups = [list(itertools.islice(total_eval, len(group))) for group in groups]  # 2D list of per-image F1s across control groups
-			control_means = np.array(lmap(np.mean, control_groups))  # 1D array of per-control-group mean F1s
+		if n_samples:
+			groups = [np.random.choice(group, n_samples, False) for group in groups]  # List of 1D arrays of per-image F1s for stratified groups
+		group_means = np.array(lmap(np.mean, groups))  # 1D array of per-stratified-group mean F1s
+		group_stds = np.array(lmap(np.std, groups))  # 1D array of per-stratified-group σ of F1
+		control_groups = [list(it.islice(shuffled(list(flatten(groups))), len(group))) for group in groups]  # 2D list of per-image F1s across control groups
+		control_means = np.array(lmap(np.mean, control_groups))  # 1D array of per-control-group mean F1s
 
-			strat = bool(n_samples)  # Stratified?
-			bias[strat][pb]['σ'] = group_means.std()  # Scalar σ of F1 means across groups
-			bias[strat][pb]['MAD'] = np.mean(np.abs(group_means - group_means.mean()))  # Scalar mean absolute deviation of F1 means across groups
-			bias[strat][pb]['Fisher'] = bias[strat][pb]['σ'] / control_means.std()  # Scalar ratio between σ of F1 means across groups and σ of F1 means across control groups
-			bias[strat][pb]['Vito'] = bias[strat][pb]['σ'] / group_stds.mean()  # Scalar ratio between σ of F1 means across groups and the mean σ of F1 within groups
+		strat = bool(n_samples)  # Stratified?
+		bias[strat]['σ'] = group_means.std()  # Scalar σ of F1 means across groups
+		bias[strat]['MAD'] = np.mean(np.abs(group_means - group_means.mean()))  # Scalar mean absolute deviation of F1 means across groups
+		bias[strat]['Fisher'] = bias[strat]['σ'] / control_means.std()  # Scalar ratio between σ of F1 means across groups and σ of F1 means across control groups
+		bias[strat]['Vito'] = bias[strat]['σ'] / group_stds.mean()  # Scalar ratio between σ of F1 means across groups and the mean σ of F1 within groups
 
 		return bias
 
@@ -237,22 +261,19 @@ class Main:
 		save = self.eval_dir/f'Bias - {name}.txt'
 		print(f"Saving to {save}")
 		with save.open('w', encoding='utf-8') as f:
-			for i, pb in enumerate(("Probabilistic", "Binarised")):
-				for s, strat in enumerate(("Total", "Stratified")):
-					print(f"{pb} ({strat})", file=f)
-					for metric, score in bias[s][i].items():
-						print(f"{metric}: {score}", file=f)
-					print(file=f)
+			for s, strat in enumerate(("Total", "Stratified")):
+				print(strat, file=f)
+				for metric, score in bias[s].items():
+					print(f"{metric}: {score}", file=f)
+				print(file=f)
 
-	def _latexify_biases(self, bias, model, train, latex, train_datasets=TRAIN_DATASETS):
-		if train == train_datasets[0]:  # First line of model
-			latex.write(fr"\multirow{{{len(train_datasets)}}}{{*}}{{{model}}}")
-		latex.write(f" & {train if train == train_datasets[0] else train.ljust(max(map(len, train_datasets[1:])))}")
-		for pb in (1, 0):  # 1 = probabilistic, 0 = binarised
-			for metric in ('σ', 'MAD', 'Fisher', 'Vito'):
-				latex.write("".join(f" & ${fmt(bias[strat][pb][metric])}$" for strat in (False, True)))
+	def _latexify_biases(self, bias, model, train, latex, trains=list(TRAIN_TEST_DICT)):
+		if train == trains[0]:  # First line of model
+			latex.write(fr"\multirow{{{len(trains)}}}{{*}}{{{model}}}")
+		latex.write(f" & {train if train == trains[0] else train.ljust(max(map(len, trains[1:])))}")
+		latex.write("".join(f" & ${fmt(bias[strat][metric])}$" for strat in (False, True) for metric in ('σ', 'MAD', 'Fisher', 'Vito')))
 		latex.write(r" \\")
-		if train == train_datasets[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
+		if train == trains[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
 		latex.write("\n")
 
@@ -516,17 +537,17 @@ class Scatter(Figure):
 		self.ax.set_ylim(min(ymin - ytick_size, 0), ymax + ytick_size)
 		self.ax.yaxis.set_major_locator(MultipleLocator(ytick_size))
 		self.ax.yaxis.set_minor_locator(MultipleLocator(ytick_size / 2))
-		self.save(f'{self.name} (No Legend)')
+		#self.save(f'{self.name} (No Legend)')
 		if self.ax.get_legend_handles_labels()[0]:
 			self.ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
 		self.save()
 
-	def plot(self, x, y, size=None, *, label=None, colour=None):
+	def plot(self, x, y, size=None, *, label=None, colour=None, marker=None):
 		super().plot()
 		markersize = 8
 		if size:
 			self.ax.plot(x, y, 'o', markersize=size, color=(*colour[:3], .25))
-		self.ax.plot(x, y, 'o', markersize=markersize, label=label, color=colour)
+		self.ax.plot(x, y, marker, markersize=markersize, label=label, color=colour)
 
 		self.xmin = min(self.xmin, x)
 		self.xmax = max(self.xmax, x)
