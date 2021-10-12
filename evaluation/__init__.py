@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import itertools as it
 from matej.collections import ensure_iterable
 from matej.math import RunningStats
+import numpy as np
 import re
 
 
@@ -67,6 +68,10 @@ class Evaluation(dict):
 
 	def __iter__(self):
 		yield from self.values()
+
+
+def def_tick_format(x, _):
+	return np.format_float_positional(x, precision=3, trim='-')
 
 
 from .segmentation import BinarySegmentationEvaluation, BinaryIntensitySegmentationEvaluation

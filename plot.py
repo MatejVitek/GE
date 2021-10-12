@@ -7,20 +7,17 @@ from pathlib import Path
 from ast import literal_eval
 from matej import make_module_callable
 from matej.collections import DotDict, dzip, ensure_iterable, lmap, shuffle, treedict
-from matej.parallel import tqdm_joblib
 import argparse
 from tkinter import *
-from tkinter.colorchooser import askcolor
 import tkinter.filedialog as filedialog
-from joblib.parallel import Parallel, delayed
-from tqdm import tqdm
 
 # Import whatever else is needed
-from compute import ATTR_EXP, TRAIN_DATASETS, TEST_DATASETS, Plot  # Plot is needed for pickle loading
+from compute import TRAIN_DATASETS, TEST_DATASETS, Plot  # Plot is needed for pickle loading
 from abc import ABC, abstractmethod
 from evaluation.segmentation import *
-from evaluation.plot import def_tick_format
+from evaluation import def_tick_format
 import itertools
+import logging
 import math
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, MultipleLocator
@@ -28,7 +25,7 @@ from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
 import numpy as np
 import pickle
 from random import sample
-import logging
+from statistics import harmonic_mean
 
 
 # If you get "Cannot connect to X display" errors, run this script as:
@@ -37,12 +34,16 @@ import logging
 
 
 # Constants
-FIG_EXTS = 'png', 'pdf', 'svg', 'eps'
-CMAP = plt.cm.plasma
-ZOOMED_LIMS = .6, .95
+ATTR_EXP = 'colour', 'light', 'phone', ('light', 'phone'), 'gaze'  # What to run attribute-based bias experiments on
+FIG_EXTS = 'pdf',# 'png', 'svg', 'eps'  # Which formats to save figures to
+CMAP = plt.cm.plasma  # Colourmap to use in figures
+ZOOMED_LIMS = .6, .95  # Axis limits of zoomed-in P/R curves
 model_complexity = {
+	'cgans2020cl': (11.5e6, None),
+	'fcn8': (138e6, 15e9),
 	'mu-net': (409e3, 180e9),
-	'rgb-ss-eye-ms': (22.6e6, None),
+	'rgb-ss-eye-ms': (22.7e6, None),
+	'scleramaskrcnn': (69e6, None),
 	'sclerasegnet': (59e6, 17.94e9),
 	'sclerau-net2': (3e6, 180e9)
 }
@@ -51,6 +52,7 @@ model_complexity = {
 TRAIN_TEST_DICT = {train: [test for test in TEST_DATASETS if test not in train and not (train == 'All' and test == 'SMD')] for train in TRAIN_DATASETS}  # Filter out invalid train-test configurations
 TRAIN_TEST = [(train, test) for train, tests in TRAIN_TEST_DICT.items() for test in tests]  # List of all valid train-test configurations
 FIG_EXTS = ensure_iterable(FIG_EXTS, True)
+colourise = lambda x: zip(x, CMAP(np.linspace(0, 1, len(x))))
 fmt = lambda x: np.format_float_positional(x, precision=3, unique=False)
 logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'PostScript backend' not in record.getMessage())  # Suppress matplotlib warnings about .eps transparency
 
@@ -61,6 +63,8 @@ class Main:
 		root = Path('')
 		self.models = Path(args[0] if len(args) > 0 else kw.get('models', root/'Models'))
 		self.save = Path(args[1] if len(args) > 1 else kw.get('save', 'Results'))
+		self.k = kw.get('k', 5)
+		self.discard = kw.get('discard', {'GFCM1', 'GFCM2', 'HSFCM', 'I-FCM', 'RSKFCM'})
 		self.plot = kw.get('plot', False)
 
 		# Extra keyword arguments
@@ -77,24 +81,35 @@ class Main:
 		self.fig_dir = self.save/'Figures'
 		self.eval_dir.mkdir(parents=True, exist_ok=True)
 		self.fig_dir.mkdir(parents=True, exist_ok=True)
-		#self.bin_only = smap(str.lower, ensure_iterable(self.extra.get('no_roc', ('ScleraMaskRCNN')), True))
-
-		plt.rcParams['font.family'] = 'Times New Roman'
+		
+		#plt.rcParams['font.family'] = 'Times New Roman'  # This doesn't work without MS fonts installed
+		plt.rcParams['font.family'] = 'serif'
+		plt.rcParams['font.serif'] = 'Times New Roman'
 		plt.rcParams['font.weight'] = 'normal'
 		plt.rcParams['font.size'] = 24
 
-		print("Sorting models by their mean binary F1-Score")
-		self._sorted_models = sorted(os.listdir(self.models), key=lambda model: np.array([self._load(model, f'{train}_{test}')[1].f1score.mean for train in TRAIN_DATASETS for test in TEST_DATASETS]).mean(), reverse=True)
-
+		self._samples = treedict()
 		self._results = treedict()
-		for model in self._sorted_models:
-			for f in (self.models/model/'Pickles').iterdir():
-				train, test, *attr = f.stem.split('_')
-				if attr:
-					attr_name, attr_val = attr[0].split('=')
-					self._results[model][train][test][attr_name][attr_val] = self._load(model, f.stem)
-				else:
-					self._results[model][train][test]['overall'] = self._load(model, f.stem)
+		self._plots = treedict()
+		self._mean_plots = treedict()
+		self._hmeans = treedict()
+		for model_dir in self.models.iterdir():
+			model = model_dir.name
+			if model in self.discard:
+				continue
+			for train, tests in TRAIN_TEST_DICT.items():
+				# Read results
+				for test in tests:
+					for collection, result in zip((self._samples, self._results, self._plots, self._mean_plots), self._load(model_dir, f'{train}_{test}')):
+						collection[model][train][test] = result
+
+				# Compute harmonic means
+				for pb in range(2):
+					for metric in next(iter(self._results[model][train].values()))[pb]:
+						self._hmeans[model][train][pb][metric] = harmonic_mean([self._results[model][train][t][pb][metric].mean() for t in tests])
+
+		print("Sorting models by the harmonic mean of their binary F1-Scores on the evaluation datasets")
+		self._sorted_models = sorted(self._results.keys(), key=lambda model: self._hmeans[model]['All'][1]['F1-score'], reverse=True)
 
 		self._experiment1()
 		for attr in ATTR_EXP:
@@ -106,16 +121,33 @@ class Main:
 
 	def _experiment1(self):
 		print("Experiment 1: Overall performance")
-		with Bar('Overall', self.fig_dir, self._sorted_models, len(TRAIN_TEST)) as bar, (self.eval_dir/'LaTeX - Performance.txt').open('w', encoding='utf-8') as latex:
-			for i, model in enumerate(self._sorted_models):
-				colours = dzip(TRAIN_TEST_DICT, CMAP(np.linspace(0, 1, len(TRAIN_TEST_DICT))))
-				for j, (train, test) in enumerate(TRAIN_TEST):
-					pred_eval, bin_eval = self._results[model][train][test]['overall'][:2]
-					self._save_evals(pred_eval, bin_eval, f'{model} - {train} - {test}')
-					#self._latexify_evals(pred_eval, bin_eval, model, train, test, latex)
-					bar.plot(bin_eval, i, j, colour=colours[train], label=f"{train}-{test}")
-				for train in TRAIN_TEST_DICT:
-					self._latexify_evals(pred_eval, bin_eval, model, train, latex)
+		tests = TRAIN_TEST_DICT['All']
+
+		# Save and latexify overall performances
+		with (self.eval_dir/'LaTeX - Performance.txt').open('w', encoding='utf-8') as latex:
+			for model in self._sorted_models:
+				for test in tests:
+					r = self._results[model]['All'][test]
+					mean_std = [{metric: (r[pb][metric].mean(), r[pb][metric].std()) for metric in r[pb]} for pb in range(2)]
+					self._save_evals(mean_std, f'{model} - All - {test}')
+					self._latexify_evals(mean_std, self._hmeans[model]['All'], model, test, tests, latex)
+
+		# Plot overall performances to bar plot and P/R curves
+		with Bar('Overall', self.fig_dir, self._sorted_models, len(tests)) as bar:
+			for i, (test, t_colour) in enumerate(colourise(tests)):
+				with ROC(test, self.fig_dir) as roc:
+					for j, (model, m_colour) in enumerate(colourise(self._sorted_models)):
+						mean_plot, lower_std, upper_std = self._mean_plots[model]['All'][test]
+
+						# Compute k-fold std
+						results = self._results[model]['All'][test][1]['F1-score'].copy()
+						np.random.shuffle(results)
+						folds = np.array_split(results, self.k)
+						std = np.std(lmap(np.mean, folds))
+
+						bar.plot(results.mean(), j, i, std=std, label=test, colour=t_colour)
+						#roc.plot(mean_plot, lower_std, upper_std, label=model, colour=m_colour)
+						roc.plot(mean_plot, label=model, colour=m_colour)
 
 	def _experiment2(self, attr):
 		attr = attr.title()
@@ -139,73 +171,36 @@ class Main:
 					self._save_biases(bias, f'{model} - {train}')
 					self._latexify_biases(bias, model, train, latex, train_datasets=train_datasets)
 
-	""" def _experiment3(self):
-		print("Experiment 3: Performance across complexities")
-		models_with_size = [model for model in self._sorted_models if model.lower() in model_complexity]
-		models_with_both = [model for model in models_with_size if model_complexity[model.lower()][1] is not None]
-		size_colours = CMAP(np.linspace(0, 1, len(models_with_size)))
-		both_colours = CMAP(np.linspace(0, 1, len(models_with_both)))
+	def _load(self, model_dir, name):
+		f = model_dir/f'Pickles/{name}.pkl'
+		if not f.is_file():
+			raise ValueError(f"{f} does not exist")
+		print(f"Loading data from {f}")
+		with open(f, 'rb') as f:
+			return [pickle.load(f) for _ in range(4)]
 
-		with Scatter('Size', self.fig_dir) as size, Scatter('Both', self.fig_dir) as both:
-			for model, colour in zip(models_with_size, size_colours):
-				bin_eval = self._load(model, 'Overall')[1]
-				size.plot(model_complexity[model.lower()][0], bin_eval.f1score.mean, label=model, colour=colour)
-				both.plot(model_complexity[model.lower()][0], bin_eval.f1score.mean, model_complexity[model.lower()][1], label=model, colour=colour)
-		with Scatter('Full Only', self.fig_dir) as full:
-			for model, colour in zip(models_with_both, both_colours):
-				bin_eval = self._load(model, 'Overall')[1]
-				full.plot(model_complexity[model.lower()][0], bin_eval.f1score.mean, model_complexity[model.lower()][1], label=model, colour=colour) """
-
-	def _load(self, model, name):
-		name = self.models/model/f'Pickles/{name}.pkl'
-		if not name.is_file():
-			raise ValueError(f"{name} does not exist")
-		print(f"Loading data from {name}")
-		with open(name, 'rb') as f:
-			return pickle.load(f) + pickle.load(f)
-
-	def _save_evals(self, pred_eval, bin_eval, name):
+	def _save_evals(self, mean_std, name):
 		save = self.eval_dir/f'{name}.txt'
 		print(f"Saving to {save}")
 		with save.open('w', encoding='utf-8') as f:
-			print("Probabilistic", file=f)
-			print(pred_eval, file=f)
-			print(file=f)
-			print("Binarised", file=f)
-			print(bin_eval, file=f)
+			for pb, pb_text in enumerate(("Probabilistic", "Binarised")):
+				print(pb_text, file=f)
+				for metric, (mean, std) in mean_std[pb].items():
+					print(f"{metric} (μ ± σ): {mean} ± {std}", file=f)
+				print(file=f)
 
-	'''
-	def _latexify_evals(self, pred_eval, bin_eval, model, train, test, latex):
-		if (train, test) == TRAIN_TEST[0]:  # First line of model
-			latex.write(fr"\multirow{{{len(TRAIN_TEST)}}}{{*}}{{{model}}}")
-		latex.write(" &")
-		if test == TRAIN_TEST_DICT[train][0]:  # First line of model+train
-			latex.write(fr" \multirow{{{len(TRAIN_TEST_DICT[train])}}}{{*}}{{{train}}}")
-		latex.write(f" & {test}")
-		for pb_eval, metrics in ((bin_eval, ('F1-score', 'Precision', 'Recall', 'IoU')), (pred_eval, ('F1-score', 'AUC'))):
-			for metric in metrics:
-				latex.write(fr" & ${fmt(pb_eval[metric].mean)} \pm {fmt(pb_eval[metric].std)}$ &")
-				if test == TRAIN_TEST_DICT[train][0]:  # First line of model+train
-					mean = np.mean([self._results[model][train][t]['overall'][pb_eval is bin_eval][metric].mean for t in TRAIN_TEST_DICT[train]])
-					latex.write(fr" \multirow{{{len(TRAIN_TEST_DICT[train])}}}{{*}}{{{fmt(mean)}}}")
-		latex.write(r" \\")
-		if test == TRAIN_TEST_DICT[train][-1] and train != list(TRAIN_TEST_DICT)[-1]:  # Last line of model+train but not of model
-			latex.write(r"\cmidrule(lr){2-15}")
-		elif (train, test) == TRAIN_TEST[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
-			latex.write(r"\hline")
-		latex.write("\n")
-	'''
-
-	def _latexify_evals(self, pred_eval, bin_eval, model, train, latex):
-		if train == list(TRAIN_TEST_DICT)[0]:  # First line of model
-			latex.write(fr"\multirow{{{len(TRAIN_TEST_DICT)}}}{{*}}{{{model}}} & {train} ")
+	def _latexify_evals(self, mean_std, hmean, model, test, tests, latex):
+		if test == tests[0]:  # First line of model
+			latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{model}}} & {test} ")
 		else:
-			latex.write(f" & {train.ljust(max(map(len, list(TRAIN_TEST_DICT)[1:])))} ")
-		for pb_eval, metrics in ((bin_eval, ('F1-score', 'Precision', 'Recall', 'IoU')), (pred_eval, ('F1-score', 'AUC'))):
+			latex.write(f" & {test.ljust(max(map(len, tests[1:])))} ")
+		for bp, metrics in enumerate((('F1-score', 'Precision', 'Recall', 'IoU'), ('F1-score', 'AUC'))):
 			for metric in metrics:
-				latex.write(f"& {fmt(np.mean([self._results[model][train][test]['overall'][pb_eval is bin_eval][metric].mean for test in TRAIN_TEST_DICT[train]]))} ")
+				latex.write(f"& {fmt(mean_std[not bp][metric][0])} & ")
+				if test == tests[0]:  # First line of model
+					latex.write(f"{fmt(hmean[not bp][metric])} ")
 		latex.write(r"\\")
-		if train == list(TRAIN_TEST_DICT)[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
+		if test == tests[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
 		latex.write("\n")
 
@@ -265,6 +260,8 @@ class Main:
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
 		ap.add_argument('models', type=Path, nargs='?', default=self.models, help="directory with model information")
 		ap.add_argument('save', type=Path, nargs='?', default=self.save, help="directory to save figures and evaluations to")
+		ap.add_argument('-k', '--folds', type=int, default=self.k, help="number of folds to use for std")
+		ap.add_argument('-d', '--discard', action='append', type=str, help="discard model")
 		ap.add_argument('-p', '--plot', action='store_true', help="show drawn plots")
 		ap.parse_known_args(namespace=self)
 
@@ -323,10 +320,18 @@ class Figure(ABC):
 			print(f"Saving to {save}")
 			fig.savefig(save, bbox_inches='tight')
 
+	@staticmethod
+	def _nice_tick_size(min_, max_, min_ticks=3, max_ticks=7):
+		diff = max_ - min_
+		return min(
+			np.array([.1, .2, .5, 1, 2, 5]) * 10 ** math.floor(math.log10(diff)),  # Different possible tick sizes
+			key=lambda tick_size: (max(min_ticks - (n_ticks := diff // tick_size + 1), n_ticks - max_ticks, 0), n_ticks)  # Return the one closest to the specified range. If several are in the range, return the one with the fewest ticks.
+		)
+
 
 class ROC(Figure):
 	def __init__(self, name, save_dir, fontsize=20):
-		super().__init__(f'{name} ROC', save_dir, fontsize)
+		super().__init__(f'ROC - {name}', save_dir, fontsize)
 		self.cmb_fig = None
 		self.cmb_ax = None
 		self.zoom_ax = None
@@ -358,7 +363,7 @@ class ROC(Figure):
 		#self.ax.xaxis.set_minor_locator(MultipleLocator(.1))
 		self.ax.yaxis.set_major_locator(MultipleLocator(.2))
 		#self.ax.yaxis.set_minor_locator(MultipleLocator(.1))
-		self.save(f'{self.name} (No Legend)')
+		#self.save(f'{self.name} (No Legend)')
 
 		_, labels = self.ax.get_legend_handles_labels()
 		if labels:
@@ -372,11 +377,11 @@ class ROC(Figure):
 		self.ax.xaxis.set_minor_locator(MultipleLocator(.05))
 		self.ax.yaxis.set_major_locator(MultipleLocator(.1))
 		self.ax.yaxis.set_minor_locator(MultipleLocator(.05))
-		self.save(f'{self.name} (Zoomed)')
+		#self.save(f'{self.name} (Zoomed)')
 
 		if labels:
 			legend.remove()
-			self.save(f'{self.name} (Zoomed, No Legend)')
+			#self.save(f'{self.name} (Zoomed, No Legend)')
 
 		self.cmb_ax.set_xlim(.2, 1.01)
 		self.cmb_ax.set_ylim(.2, 1.01)
@@ -389,7 +394,7 @@ class ROC(Figure):
 		self.zoom_ax.xaxis.set_minor_locator(MultipleLocator(.05))
 		self.zoom_ax.yaxis.set_major_locator(MultipleLocator(.1))
 		self.zoom_ax.yaxis.set_minor_locator(MultipleLocator(.05))
-		self.save(f'{self.name} (Combined, No Legend)', self.cmb_fig)
+		#self.save(f'{self.name} (Combined, No Legend)', self.cmb_fig)
 
 		if labels:
 			self.cmb_ax.legend(bbox_to_anchor=(2.2, .5), loc='center left', ncol=ncol, columnspacing=.5, borderaxespad=0)
@@ -412,7 +417,7 @@ class ROC(Figure):
 
 class Bar(Figure):
 	def __init__(self, name, save_dir, groups, n=1, fontsize=30, margin=.2):
-		super().__init__(f'{name} bar', save_dir, fontsize)
+		super().__init__(f'Bar - {name}', save_dir, fontsize)
 		self.groups = groups
 		self.m = len(groups)
 		self.n = n
@@ -444,70 +449,73 @@ class Bar(Figure):
 			else:
 				ncol = 3
 			self.ax.legend(by_label.values(), by_label.keys(), ncol=ncol, bbox_to_anchor=(.02, 1.02, .96, .1), loc='lower left', mode='expand', borderaxespad=0)
-		ymin = max(self.min - .01, 0) if self.min != float('inf') else 0
-		ymax = self.max + .01 if self.max != float('-inf') else 1.01
-		self.ax.set_ylim(ymin, ymax)
 		self.ax.set_xticks(np.arange(self.m) + (self.margin + self.n * self.width) / 2)
-		self.ax.set_xticklabels(self.groups, rotation=60, ha='right', rotation_mode='anchor')
-		if ymax - ymin >= .35:
-			self.ax.yaxis.set_major_locator(MultipleLocator(.1))
-			self.ax.yaxis.set_minor_locator(MultipleLocator(.05))
-		else:
-			self.ax.yaxis.set_major_locator(MultipleLocator(.05))
-			self.ax.yaxis.set_minor_locator(MultipleLocator(.025))
+		#self.ax.set_xticklabels(self.groups, rotation=60, ha='right', rotation_mode='anchor')  # Rotated x labels
+		self.ax.set_xticklabels([group if g % 2 else f"\n{group}" for g, group in enumerate(self.groups)])  # 2-row x labels
+		ymin = self.min if self.min != float('inf') else 0
+		ymax = self.max if self.max != float('-inf') else 1.01
+		ytick_size = self._nice_tick_size(ymin, ymax)
+		self.ax.set_ylim(max(ymin - ytick_size, 0), ymax + ytick_size)
+		self.ax.yaxis.set_major_locator(MultipleLocator(ytick_size))
+		self.ax.yaxis.set_minor_locator(MultipleLocator(ytick_size / 2))
 		self.save()
 		self.ax.tick_params(axis='x', bottom=False, labelbottom=False)
-		self.save(f'{self.name} (No Labels)')
+		#self.save(f'{self.name} (No Labels)')
 
-	def plot(self, evaluation, group=0, index=0, *, label=None, colour=None):
+	def plot(self, val, group=0, index=0, *, std=None, label=None, colour=None):
 		super().plot()
 		plt.rcParams['font.size'] = 10
 		err_w = np.clip(self.width * 10, 2, 5)
 		self.ax.bar(
 			group + self.margin / 2 + index * self.width,
-			evaluation.f1score.mean,
-			yerr=evaluation.f1score.std,
+			val,
+			yerr=std,
 			error_kw=dict(lw=err_w, capsize=1.5 * err_w, capthick=.5 * err_w),
 			width=self.width,
 			align='edge',
 			label=label,
 			color=colour
 		)
-		self.min = min(self.min, evaluation.f1score.mean - evaluation.f1score.std)
-		self.max = max(self.max, evaluation.f1score.mean + evaluation.f1score.std)
+		self.min = min(self.min, val - std if std else val)
+		self.max = max(self.max, val + std if std else val)
 
 
 class Scatter(Figure):
-	def __init__(self, name, save_dir, fontsize=28):
-		super().__init__(f'{name} scatter', save_dir, fontsize)
-		self.min = None
-		self.max = None
+	def __init__(self, name, save_dir, xscale='linear', fontsize=28):
+		super().__init__(f'Scatter - {name}', save_dir, fontsize)
+		self.xscale = xscale
+		self.xmin = self.xmax = self.ymin = self.ymax = None
 
 	def __enter__(self):
 		super().__enter__()
 		self.ax.grid(axis='y', which='major', alpha=.5)
 		self.ax.grid(axis='y', which='minor', alpha=.2)
-		self.ax.set_xscale('log')
+		self.ax.set_xscale(self.xscale)
 		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
 		self.ax.margins(0)
 		self.ax.set_xlabel("# Parameters")
 		self.ax.set_ylabel("F1-Score")
 		self.fig.tight_layout(pad=0)
-		self.min = float('inf')
-		self.max = float('-inf')
+		self.xmin = self.ymin = float('inf')
+		self.xmax = self.ymax = float('-inf')
 		return self
 
 	def close(self, *args, **kw):
-		ymin = max(self.min - .1, 0) if self.min != float('inf') else 0
-		ymax = self.max + .1 if self.max != float('-inf') else 1.01
-		self.ax.set_xlim(1, 3e8)
-		self.ax.set_ylim(ymin, ymax)
-		if ymax - ymin >= .35:
-			self.ax.yaxis.set_major_locator(MultipleLocator(.1))
-			self.ax.yaxis.set_minor_locator(MultipleLocator(.05))
+		if self.xscale == 'log':
+			self.ax.set_xlim(1, 1e9)
 		else:
-			self.ax.yaxis.set_major_locator(MultipleLocator(.05))
-			self.ax.yaxis.set_minor_locator(MultipleLocator(.025))
+			xmin = self.xmin if self.xmin != float('inf') else 0
+			xmax = self.xmax + .1 if self.xmax != float('-inf') else 1.01
+			xtick_size = self._nice_tick_size(xmin, xmax)
+			self.ax.set_ylim(min(xmin - xtick_size, 0), xmax + xtick_size)
+			self.ax.yaxis.set_major_locator(MultipleLocator(xtick_size))
+			self.ax.yaxis.set_minor_locator(MultipleLocator(xtick_size / 2))
+		ymin = self.ymin if self.ymin != float('inf') else 0
+		ymax = self.ymax + .1 if self.ymax != float('-inf') else 1.01
+		ytick_size = self._nice_tick_size(ymin, ymax)
+		self.ax.set_ylim(min(ymin - ytick_size, 0), ymax + ytick_size)
+		self.ax.yaxis.set_major_locator(MultipleLocator(ytick_size))
+		self.ax.yaxis.set_minor_locator(MultipleLocator(ytick_size / 2))
 		self.save(f'{self.name} (No Legend)')
 		if self.ax.get_legend_handles_labels()[0]:
 			self.ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
@@ -516,14 +524,14 @@ class Scatter(Figure):
 	def plot(self, x, y, size=None, *, label=None, colour=None):
 		super().plot()
 		markersize = 8
-		flopsize = 0
 		if size:
-			#flopsize = 2e-4 * math.sqrt(size)
-			flopsize = 2 * math.log(size)
-			self.ax.plot(x, y, 'o', markersize=flopsize, color=(*colour[:3], .3))
+			self.ax.plot(x, y, 'o', markersize=size, color=(*colour[:3], .25))
 		self.ax.plot(x, y, 'o', markersize=markersize, label=label, color=colour)
-		self.min = min(self.min, y)
-		self.max = max(self.max, y)
+
+		self.xmin = min(self.xmin, x)
+		self.xmax = max(self.xmax, x)
+		self.ymin = min(self.ymin, y)
+		self.ymax = max(self.ymax, y)
 
 
 class GUI(Tk):
@@ -553,6 +561,14 @@ class GUI(Tk):
 		self.save_txt.grid(column=1, columnspan=3, row=row)
 		self.save_btn = Button(self.frame, text="Browse", command=self.browse_save)
 		self.save_btn.grid(column=4, row=row)
+
+		row += 1
+		self.k_lbl = Label(self.frame, text="Folds:")
+		self.k_lbl.grid(column=0, row=row, stick='w')
+		self.k_spn = Spinbox(self.frame, from_=1, to=100)
+		self.k_spn.delete(0, END)
+		self.k_spn.insert(END, self.k)
+		self.k_spn.grid(column=1, row=row)
 
 		row += 1
 		self.chk_frame = Frame(self.frame)
