@@ -83,7 +83,7 @@ class Main:
 		self.fig_dir = self.save/'Figures'
 		self.eval_dir.mkdir(parents=True, exist_ok=True)
 		self.fig_dir.mkdir(parents=True, exist_ok=True)
-		
+
 		plt.rcParams['font.family'] = 'Times New Roman'  # This doesn't work without MS fonts installed
 		plt.rcParams['font.weight'] = 'normal'
 		plt.rcParams['font.size'] = 24
@@ -169,36 +169,46 @@ class Main:
 
 					bias[model][train] = self._compute_biases(groups)
 					self._save_biases(bias[model][train], f'{model} - {train} - {name}')
-					self._latexify_biases(bias[model][train], model, train, latex)
+					self._latexify_biases(bias[model][train], latex, model, train, list(TRAIN_TEST_DICT))
 
 		# Plot biases
-		metrics = next(iter(next(iter(bias.values())).values()))[0]
-		for strat in range(2):
-			fig_name = name + (" (Stratified)" if strat else "")
-			with Bar(f'Bias across {fig_name}', self.fig_dir, self._sorted_models, len(metrics)) as bar:
-				for i, (metric, bar_colour) in enumerate(colourise(metrics)):
-					max_bias = {metric: max(bias[model]['All'][strat][metric] for model in self._sorted_models) for metric in metrics}
-					with Scatter(f'Bias ({metric}) across {fig_name}', self.fig_dir, xlabel="F1-score", ylabel=metric) as scatter, \
-					     Scatter(f'Bias ({metric}) and Size across {fig_name}', self.fig_dir, xscale='log') as size:
-						for j, ((model, sc_colour), marker) in enumerate(zip(colourise(self._sorted_models), MARKERS)):
-							f1 = self._results[model]['All']['MOBIUS'][1]['F1-score'].mean()
-							b = bias[model]['All'][strat][metric]
-							if metric not in ('σ', 'MAD'):
-								b = b / max_bias[metric] * max(max_bias['σ'], max_bias['MAD'])  # Normalise bias if not σ or MAD
-
-							bar.plot(b, j, i, label=metric, colour=bar_colour)
-							scatter.plot(f1, b, label=model, colour=sc_colour, marker=marker)
-							size.plot(model_complexity[model.lower()][0], f1, 1000*b, label=model, colour=sc_colour, marker=marker)
+		self._plot_biases({model: bias[model]['All'] for model in bias}, {model: self._results[model]['All']['MOBIUS'][1]['F1-score'].mean() for model in self._results}, name)
 
 	def _experiment3(self):
 		print("Experiment 3: Bias across different evaluation datasets")
+		trains = [train for train in TRAIN_TEST_DICT if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD so we can consistently compute bias on 3 evaluation datasets
+
+		# Compute, save, and latexify biases
+		bias = treedict()
 		with (self.eval_dir/'LaTeX - Bias - Test data.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
-				train_datasets = [train for train in TRAIN_DATASETS if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD
-				for train in train_datasets:
-					bias = self._compute_biases([test['overall'][:2] for test in self._results[model][train].values()])
-					self._save_biases(bias, f'{model} - {train}')
-					self._latexify_biases(bias, model, train, latex, train_datasets=train_datasets)
+				for train in trains:
+					groups = [self._results[model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
+					bias[model][train] = self._compute_biases(groups)
+					self._save_biases(bias[model][train], f'{model} - {train}')
+					self._latexify_biases(bias[model][train], latex, model, train, trains)
+
+		# Plot biases
+		for train in trains:
+			self._plot_biases({model: bias[model][train] for model in bias}, {model: self._hmeans[model][train][1]['F1-score'] for model in self._hmeans}, f"test data ({train})")
+
+	def _plot_biases(self, bias, f1, fig_suffix):
+		metrics = list(next(iter(bias.values()))[0])
+		for strat in range(2):
+			if strat:
+				fig_suffix += " (Stratified)"
+			with Bar(f'Bias across {fig_suffix}', self.fig_dir, self._sorted_models, len(metrics)) as bar:
+				for i, (metric, bar_colour) in enumerate(colourise(metrics)):
+					max_bias = {metric: max(bias[model][strat][metric] for model in self._sorted_models) for metric in metrics}
+					with Scatter(f'Bias ({metric}) across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) as scatter, \
+						Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log') as size:
+						for j, ((model, sc_colour), marker) in enumerate(zip(colourise(self._sorted_models), MARKERS)):
+							b = bias[model][strat][metric]
+							b_normalised_to_01 = b / max_bias[metric]  # Normalise bias to 0-1 range (for marker size in scatter plot)
+							b_normalised_to_stdmad = (b_normalised_to_01 * max(max_bias['σ'], max_bias['MAD'])) if metric not in ('σ', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
+							bar.plot(b_normalised_to_stdmad, j, i, label=metric, colour=bar_colour)
+							scatter.plot(f1[model], b, label=model, colour=sc_colour, marker=marker)
+							size.plot(model_complexity[model.lower()][0], f1[model], 100*b_normalised_to_01, label=model, colour=sc_colour, marker=marker)
 
 	def _load(self, model_dir, name):
 		f = model_dir/f'Pickles/{name}.pkl'
@@ -238,7 +248,7 @@ class Main:
 			bias = self._compute_biases(groups, 100)
 			n_samples = 0
 		else:
-			bias = [{}, {}]
+			bias = {}, {}
 
 		if n_samples:
 			groups = [np.random.choice(group, n_samples, False) for group in groups]  # List of 1D arrays of per-image F1s for stratified groups
@@ -265,13 +275,13 @@ class Main:
 					print(f"{metric}: {score}", file=f)
 				print(file=f)
 
-	def _latexify_biases(self, bias, model, train, latex, trains=list(TRAIN_TEST_DICT)):
-		if train == trains[0]:  # First line of model
-			latex.write(fr"\multirow{{{len(trains)}}}{{*}}{{{model}}}")
-		latex.write(f" & {train if train == trains[0] else train.ljust(max(map(len, trains[1:])))}")
+	def _latexify_biases(self, bias, latex, model, column2, column2_values):
+		if column2 == column2_values[0]:  # First line of model
+			latex.write(fr"\multirow{{{len(column2_values)}}}{{*}}{{{model}}}")
+		latex.write(f" & {column2 if column2 == column2_values[0] else column2.ljust(max(map(len, column2_values[1:])))}")
 		latex.write("".join(f" & ${fmt(bias[strat][metric])}$" for strat in (False, True) for metric in ('σ', 'MAD', 'Fisher', 'Vito')))
 		latex.write(r" \\")
-		if train == trains[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
+		if column2 == column2_values[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
 		latex.write("\n")
 
