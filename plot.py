@@ -155,7 +155,6 @@ class Main:
 		name = ", ".join(f"{attr.title()}s" for attr in attrs)
 		print(f"Experiment 2: Bias across different {name}")
 
-		# Compute, save, and latexify biases
 		bias = {}
 		f1 = {}
 		with (self.eval_dir/f'LaTeX - Bias - {name}.txt').open('w', encoding='utf-8') as latex:
@@ -178,14 +177,12 @@ class Main:
 						bias[model] = b
 						f1[model] = f1scores.mean()
 
-		# Plot biases
 		self._plot_biases(bias, f1, name)
 
 	def _experiment3(self):
 		print("Experiment 3: Bias across different evaluation datasets")
 		trains = [train for train in TRAIN_TEST_DICT if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD so we can consistently compute bias on 3 evaluation datasets
 
-		# Compute, save, and latexify biases
 		bias = treedict()
 		with (self.eval_dir/'LaTeX - Bias - Test data.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
@@ -195,7 +192,6 @@ class Main:
 					self._save_biases(bias[model][train], f'{model} - {train}')
 					self._latexify_biases(bias[model][train], latex, model, train, trains)
 
-		# Plot biases
 		for train in trains:
 			self._plot_biases({model: bias[model][train] for model in bias}, {model: self._hmeans[model][train][1]['F1-score'] for model in self._hmeans}, f"test data ({train})")
 
@@ -203,7 +199,6 @@ class Main:
 		print("Experiment 4: Bias across different training datasets")
 		tests = [test for test in TEST_DATASETS if test != 'SMD']  # Skip SMD so we can consistently compute bias on 5 training configurations
 
-		# Compute, save, and latexify biases
 		bias = treedict()
 		f1 = treedict()
 		with (self.eval_dir/'LaTeX - Bias - Train data.txt').open('w', encoding='utf-8') as latex:
@@ -215,7 +210,6 @@ class Main:
 					self._save_biases(bias[model][test], f'{model} - {test}')
 					self._latexify_biases(bias[model][test], latex, model, test, test)
 
-		# Plot biases
 		for test in tests:
 			self._plot_biases({model: bias[model][test] for model in bias}, {model: f1[model][test] for model in f1}, f"train data ({test})")
 
