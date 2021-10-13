@@ -69,6 +69,18 @@ class Evaluation(dict):
 	def __iter__(self):
 		yield from self.values()
 
+	def means(self):
+		return {metric.name: metric.mean for metric in self}
+
+	def vars(self):
+		return {metric.name: metric.var for metric in self}
+
+	def stds(self):
+		return {metric.name: metric.std for metric in self}
+
+	def arrays(self, n='all'):
+		return {metric.name: np.array(metric.last(n)) for metric in self}
+
 
 def def_tick_format(x, _):
 	return np.format_float_positional(x, precision=3, trim='-')
