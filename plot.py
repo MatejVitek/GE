@@ -115,6 +115,7 @@ class Main:
 		for attr in ATTR_EXP:
 			self._experiment2(attr)
 		self._experiment3()
+		self._experiment4()
 
 		if self.plot:
 			plt.show()
@@ -155,7 +156,8 @@ class Main:
 		print(f"Experiment 2: Bias across different {name}")
 
 		# Compute, save, and latexify biases
-		bias = treedict()
+		bias = {}
+		f1 = {}
 		with (self.eval_dir/f'LaTeX - Bias - {name}.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
 				for train in TRAIN_TEST_DICT:
@@ -167,12 +169,17 @@ class Main:
 						for current_values in dict_product(possible_values)
 					]
 
-					bias[model][train] = self._compute_biases(groups)
-					self._save_biases(bias[model][train], f'{model} - {train} - {name}')
-					self._latexify_biases(bias[model][train], latex, model, train, list(TRAIN_TEST_DICT))
+					b = self._compute_biases(groups)
+					self._save_biases(b, f'{model} - {train} - {name}')
+					self._latexify_biases(b, latex, model, train, list(TRAIN_TEST_DICT))
+
+					# Save results from train config 'All' for later plotting
+					if train == 'All':
+						bias[model] = b
+						f1[model] = f1scores.mean()
 
 		# Plot biases
-		self._plot_biases({model: bias[model]['All'] for model in bias}, {model: self._results[model]['All']['MOBIUS'][1]['F1-score'].mean() for model in self._results}, name)
+		self._plot_biases(bias, f1, name)
 
 	def _experiment3(self):
 		print("Experiment 3: Bias across different evaluation datasets")
@@ -192,23 +199,25 @@ class Main:
 		for train in trains:
 			self._plot_biases({model: bias[model][train] for model in bias}, {model: self._hmeans[model][train][1]['F1-score'] for model in self._hmeans}, f"test data ({train})")
 
-	def _plot_biases(self, bias, f1, fig_suffix):
-		metrics = list(next(iter(bias.values()))[0])
-		for strat in range(2):
-			if strat:
-				fig_suffix += " (Stratified)"
-			with Bar(f'Bias across {fig_suffix}', self.fig_dir, self._sorted_models, len(metrics)) as bar:
-				for i, (metric, bar_colour) in enumerate(colourise(metrics)):
-					max_bias = {metric: max(bias[model][strat][metric] for model in self._sorted_models) for metric in metrics}
-					with Scatter(f'Bias ({metric}) across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) as scatter, \
-						Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log') as size:
-						for j, ((model, sc_colour), marker) in enumerate(zip(colourise(self._sorted_models), MARKERS)):
-							b = bias[model][strat][metric]
-							b_normalised_to_01 = b / max_bias[metric]  # Normalise bias to 0-1 range (for marker size in scatter plot)
-							b_normalised_to_stdmad = (b_normalised_to_01 * max(max_bias['σ'], max_bias['MAD'])) if metric not in ('σ', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
-							bar.plot(b_normalised_to_stdmad, j, i, label=metric, colour=bar_colour)
-							scatter.plot(f1[model], b, label=model, colour=sc_colour, marker=marker)
-							size.plot(model_complexity[model.lower()][0], f1[model], 100*b_normalised_to_01, label=model, colour=sc_colour, marker=marker)
+	def _experiment4(self):
+		print("Experiment 4: Bias across different training datasets")
+		tests = [test for test in TEST_DATASETS if test != 'SMD']  # Skip SMD so we can consistently compute bias on 5 training configurations
+
+		# Compute, save, and latexify biases
+		bias = treedict()
+		f1 = treedict()
+		with (self.eval_dir/'LaTeX - Bias - Train data.txt').open('w', encoding='utf-8') as latex:
+			for model in self._sorted_models:
+				for test in tests:
+					groups = [self._results[model][train][test][1]['F1-score'] for train in TRAIN_TEST_DICT]
+					bias[model][test] = self._compute_biases(groups)
+					f1[model][test] = harmonic_mean(lmap(np.mean, groups))
+					self._save_biases(bias[model][test], f'{model} - {test}')
+					self._latexify_biases(bias[model][test], latex, model, test, test)
+
+		# Plot biases
+		for test in tests:
+			self._plot_biases({model: bias[model][test] for model in bias}, {model: f1[model][test] for model in f1}, f"train data ({test})")
 
 	def _load(self, model_dir, name):
 		f = model_dir/f'Pickles/{name}.pkl'
@@ -284,6 +293,25 @@ class Main:
 		if column2 == column2_values[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
 		latex.write("\n")
+
+	def _plot_biases(self, bias, f1, fig_suffix):
+		metrics = list(next(iter(bias.values()))[0])
+		for strat in range(2):
+			if strat:
+				fig_suffix += " (Stratified)"
+			with Bar(f'Bias across {fig_suffix}', self.fig_dir, self._sorted_models, len(metrics), ylabel="Bias") as bar:
+				for i, (metric, bar_colour) in enumerate(colourise(metrics)):
+					max_bias = {metric: max(bias[model][strat][metric] for model in self._sorted_models) for metric in metrics}
+					with Scatter(f'Bias ({metric}) across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) as scatter, \
+						Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log') as size:
+						for j, ((model, sc_colour), marker) in enumerate(zip(colourise(self._sorted_models), MARKERS)):
+							b = bias[model][strat][metric]
+							b_normalised_to_01 = b / max_bias[metric]  # Normalise bias to 0-1 range (for marker size in scatter plot)
+							b_normalised_to_stdmad = (b_normalised_to_01 * max(max_bias['σ'], max_bias['MAD'])) if metric not in ('σ', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
+							print(model, f1[model])
+							bar.plot(b_normalised_to_stdmad, j, i, label=metric, colour=bar_colour)
+							scatter.plot(f1[model], b, label=model, colour=sc_colour, marker=marker)
+							size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=model, colour=sc_colour, marker=marker)
 
 	def process_command_line_options(self):
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
@@ -445,11 +473,12 @@ class ROC(Figure):
 				ax.plot(*mean_plot.bin_point, 'o', label=label, markersize=12, color=colour, markerfacecolor='none')
 
 class Bar(Figure):
-	def __init__(self, name, save_dir, groups, n=1, fontsize=30, margin=.2):
+	def __init__(self, name, save_dir, groups, n=1, ylabel="F1-score", fontsize=30, margin=.2):
 		super().__init__(f'Bar - {name}', save_dir, fontsize)
 		self.groups = groups
 		self.m = len(groups)
 		self.n = n
+		self.ylabel = ylabel
 		self.margin = margin
 		self.width = (1 - self.margin) / self.n
 		self.min = None
@@ -461,7 +490,7 @@ class Bar(Figure):
 		self.ax.grid(axis='y', which='minor', alpha=.2)
 		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
 		self.ax.margins(0)
-		self.ax.set_ylabel("F1-Score")
+		self.ax.set_ylabel(self.ylabel)
 		self.fig.tight_layout(pad=0)
 		self.min = float('inf')
 		self.max = float('-inf')
