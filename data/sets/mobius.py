@@ -1,5 +1,5 @@
 from enum import auto
-from matej.collections import OrderedEnum
+from matej.enum import OrderedEnum
 from pathlib import Path
 
 from . import Dataset, Sample, Direction as Dir

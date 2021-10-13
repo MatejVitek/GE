@@ -24,7 +24,6 @@ from matplotlib.ticker import FuncFormatter, MultipleLocator
 from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
 import numpy as np
 import pickle
-from random import sample
 from statistics import harmonic_mean
 
 
@@ -55,6 +54,7 @@ TRAIN_TEST = [(train, test) for train, tests in TRAIN_TEST_DICT.items() for test
 FIG_EXTS = ensure_iterable(FIG_EXTS, True)
 colourise = lambda x: zip(x, CMAP(np.linspace(0, 1, len(x))))
 fmt = lambda x: np.format_float_positional(x, precision=3, unique=False)
+oom = lambda x: 10 ** math.floor(math.log10(x))  # Order of magnitude: oom(0.9) = 0.1, oom(30) = 10
 dict_product = lambda d: (dzip(d, x) for x in it.product(*d.values()))  # {a: [1, 2], b: [3, 4]} --> [{a: 1, b: 3}, {a: 1, b: 4}, {a: 2, b: 3}, {a: 2, b: 4}]
 logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'PostScript backend' not in record.getMessage())  # Suppress matplotlib warnings about .eps transparency
 
@@ -84,9 +84,7 @@ class Main:
 		self.eval_dir.mkdir(parents=True, exist_ok=True)
 		self.fig_dir.mkdir(parents=True, exist_ok=True)
 		
-		#plt.rcParams['font.family'] = 'Times New Roman'  # This doesn't work without MS fonts installed
-		plt.rcParams['font.family'] = ['serif']
-		plt.rcParams['font.serif'] = ['Times New Roman']
+		plt.rcParams['font.family'] = 'Times New Roman'  # This doesn't work without MS fonts installed
 		plt.rcParams['font.weight'] = 'normal'
 		plt.rcParams['font.size'] = 24
 
@@ -180,7 +178,7 @@ class Main:
 			with Bar(f'Bias across {fig_name}', self.fig_dir, self._sorted_models, len(metrics)) as bar:
 				for i, (metric, bar_colour) in enumerate(colourise(metrics)):
 					max_bias = {metric: max(bias[model]['All'][strat][metric] for model in self._sorted_models) for metric in metrics}
-					with Scatter(f'Bias ({metric}) across {fig_name}', self.fig_dir) as scatter, \
+					with Scatter(f'Bias ({metric}) across {fig_name}', self.fig_dir, xlabel="F1-score", ylabel=metric) as scatter, \
 					     Scatter(f'Bias ({metric}) and Size across {fig_name}', self.fig_dir, xscale='log') as size:
 						for j, ((model, sc_colour), marker) in enumerate(zip(colourise(self._sorted_models), MARKERS)):
 							f1 = self._results[model]['All']['MOBIUS'][1]['F1-score'].mean()
@@ -190,7 +188,7 @@ class Main:
 
 							bar.plot(b, j, i, label=metric, colour=bar_colour)
 							scatter.plot(f1, b, label=model, colour=sc_colour, marker=marker)
-							size.plot(model_complexity[model.lower()][0], f1, 300*b, label=model, colour=sc_colour, marker=marker)
+							size.plot(model_complexity[model.lower()][0], f1, 1000*b, label=model, colour=sc_colour, marker=marker)
 
 	def _experiment3(self):
 		print("Experiment 3: Bias across different evaluation datasets")
@@ -345,8 +343,8 @@ class Figure(ABC):
 	def _nice_tick_size(min_, max_, min_ticks=3, max_ticks=7):
 		diff = max_ - min_
 		return min(
-			np.array([.1, .2, .5, 1, 2, 5]) * 10 ** math.floor(math.log10(diff)),  # Different possible tick sizes
-			key=lambda tick_size: (max(min_ticks - (n_ticks := diff // tick_size + 1), n_ticks - max_ticks, 0), n_ticks)  # Return the one closest to the specified range. If several are in the range, return the one with the fewest ticks.
+			oom(diff) * np.array([.1, .2, .5, 1, 2, 5]),  # Different possible tick sizes
+			key=lambda tick_size: (max(0, min_ticks - (n_ticks := diff // tick_size + 1), n_ticks - max_ticks), n_ticks)  # Return the one closest to the requested number of ticks. If several are in the range, return the one with the fewest ticks.
 		)
 
 
@@ -474,9 +472,9 @@ class Bar(Figure):
 		#self.ax.set_xticklabels(self.groups, rotation=60, ha='right', rotation_mode='anchor')  # Rotated x labels
 		self.ax.set_xticklabels([group if g % 2 else f"\n{group}" for g, group in enumerate(self.groups)])  # 2-row x labels
 		ymin = self.min if self.min != float('inf') else 0
-		ymax = self.max if self.max != float('-inf') else 1.01
+		ymax = self.max if self.max != float('-inf') else 1
 		ytick_size = self._nice_tick_size(ymin, ymax)
-		self.ax.set_ylim(max(ymin - ytick_size, 0), ymax + ytick_size)
+		self.ax.set_ylim(max(0, ymin - ytick_size), ymax + ytick_size)
 		self.ax.yaxis.set_major_locator(MultipleLocator(ytick_size))
 		self.ax.yaxis.set_minor_locator(MultipleLocator(ytick_size / 2))
 		self.save()
@@ -502,10 +500,12 @@ class Bar(Figure):
 
 
 class Scatter(Figure):
-	def __init__(self, name, save_dir, xscale='linear', fontsize=28):
+	def __init__(self, name, save_dir, xlabel="# Parameters", ylabel="F1-score", xscale='linear', fontsize=28):
 		super().__init__(f'Scatter - {name}', save_dir, fontsize)
 		self.xscale = xscale
 		self.xmin = self.xmax = self.ymin = self.ymax = None
+		self.xlabel = xlabel
+		self.ylabel = ylabel
 
 	def __enter__(self):
 		super().__enter__()
@@ -514,27 +514,27 @@ class Scatter(Figure):
 		self.ax.set_xscale(self.xscale)
 		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
 		self.ax.margins(0)
-		self.ax.set_xlabel("# Parameters")
-		self.ax.set_ylabel("F1-Score")
+		self.ax.set_xlabel(self.xlabel)
+		self.ax.set_ylabel(self.ylabel)
 		self.fig.tight_layout(pad=0)
 		self.xmin = self.ymin = float('inf')
 		self.xmax = self.ymax = float('-inf')
 		return self
 
 	def close(self, *args, **kw):
-		if self.xscale == 'log':
-			self.ax.set_xlim(1, 1e9)
-		else:
-			xmin = self.xmin if self.xmin != float('inf') else 0
-			xmax = self.xmax + .1 if self.xmax != float('-inf') else 1.01
-			xtick_size = self._nice_tick_size(xmin, xmax)
-			self.ax.set_ylim(min(xmin - xtick_size, 0), xmax + xtick_size)
-			self.ax.yaxis.set_major_locator(MultipleLocator(xtick_size))
-			self.ax.yaxis.set_minor_locator(MultipleLocator(xtick_size / 2))
+		xmin = self.xmin if self.xmin != float('inf') else 0
+		xmax = self.xmax if self.xmax != float('-inf') else 1
 		ymin = self.ymin if self.ymin != float('inf') else 0
-		ymax = self.ymax + .1 if self.ymax != float('-inf') else 1.01
+		ymax = self.ymax if self.ymax != float('-inf') else 1
+		if self.xscale == 'log':
+			self.ax.set_xlim(max(1, oom(.1 * xmin)), oom(10 * xmax))
+		else:
+			xtick_size = self._nice_tick_size(xmin, xmax)
+			self.ax.set_xlim(max(0, xmin - xtick_size), xmax + xtick_size)
+			self.ax.xaxis.set_major_locator(MultipleLocator(xtick_size))
+			self.ax.xaxis.set_minor_locator(MultipleLocator(xtick_size / 2))
 		ytick_size = self._nice_tick_size(ymin, ymax)
-		self.ax.set_ylim(min(ymin - ytick_size, 0), ymax + ytick_size)
+		self.ax.set_ylim(max(0, ymin - ytick_size), ymax + ytick_size)
 		self.ax.yaxis.set_major_locator(MultipleLocator(ytick_size))
 		self.ax.yaxis.set_minor_locator(MultipleLocator(ytick_size / 2))
 		#self.save(f'{self.name} (No Legend)')
