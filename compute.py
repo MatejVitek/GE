@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 from ast import literal_eval
-from matej.collections import DotDict, dzip, lmap
+from matej.collections import DotDict, dzip, lmap, lzip
 from matej import make_module_callable
 from matej.parallel import tqdm_joblib
 import argparse
@@ -15,8 +15,6 @@ from joblib.parallel import Parallel, delayed
 from tqdm import tqdm
 
 # Import whatever else is needed
-from data.sets import MOBIUS, SMD, SLD
-from evaluation.segmentation import *
 import itertools as it
 import numpy as np
 import operator as op
@@ -25,19 +23,26 @@ from PIL import Image
 from scipy.interpolate import interp1d
 import sklearn.metrics as skmetrics
 
+from data.sets import MOBIUS, SMD, SLD
+from evaluation.segmentation import *
+from models.descriptor_models import DescriptorModel
+#from models.keras_models import KerasModel
+
 
 # Constants
 TRAIN_DATASETS = 'All', 'MASD+SBVPI', 'MASD+SMD', 'SBVPI', 'SMD'
 TEST_DATASETS = {ds.__name__: ds for ds in (MOBIUS, SLD, SMD)}
+REC_SIZE = 400, 400  # Size for recognition models
 
 
 class Main:
 	def __init__(self, *args, **kw):
 		# Default values
-		root = Path('')
-		self.models = Path(args[0] if len(args) > 0 else kw.get('root', root/'Models'))
-		self.gt = Path(args[1] if len(args) > 1 else kw.get('gt', root/'GT'))
+		self.models = Path(args[0] if len(args) > 0 else kw.get('models', 'Models'))
+		self.datasets = Path(args[1] if len(args) > 1 else kw.get('datasets', 'Datasets'))
+		self.scleranet = Path(args[2] if len(args) > 2 else kw.get('scleranet', 'ScleraNet.hdf5'))
 		self.resize = kw.get('resize', (480, 360))
+		self.overwrite = kw.get('overwrite', False)
 
 		# Extra keyword arguments
 		self.extra = DotDict(**kw)
@@ -48,86 +53,104 @@ class Main:
 	def __call__(self):
 		if not self.models.is_dir():
 			raise ValueError(f"{self.models} is not a directory.")
-		if not self.gt.is_dir():
-			raise ValueError(f"{self.gt} is not a directory.")
+		if not self.datasets.is_dir():
+			raise ValueError(f"{self.datasets} is not a directory.")
 
 		self.threshold = np.linspace(0, 1, self.extra.get('interp', self.extra.get('interp_points', 1000)))
 
-		datasets = {name: ds.from_dir(self.gt/name, mask_dir=None) for name, ds in TEST_DATASETS.items()}
+		# Load recognition models
+		self.rec_models = {
+			#"ScleraNet": KerasModel(self.scleranet),
+			"SIFT": DescriptorModel('SIFT'),
+			"SURF": DescriptorModel('SURF'),
+			"ORB": DescriptorModel('ORB'),
+			"dSIFT": DescriptorModel('SIFT', dense=True)
+		}
+
+		datasets = {}
+		images = {}
 		gts = {}
-		for name, dataset in datasets.items():
-			dataset.shuffle()
-			with tqdm_joblib(tqdm(desc=f"Reading GT from {name}", total=len(dataset))):
-				gts[name] = dzip(dataset, Parallel(n_jobs=-1)(
-					delayed(self._load_gt)(gt_sample)
-					for gt_sample in dataset
+		for name, dataset in TEST_DATASETS.items():
+			save_f = self.datasets/name/'Samples.pkl'
+			if self.overwrite or not save_f.is_file():
+				# Dataset may be in different order, so we have to redo all experiments
+				self.overwrite = True
+				print(f"{save_f} not found, reading {name} from scratch. Any previous experiments will be redone.")
+				datasets[name] = dataset.from_dir(self.datasets/name/'Images', mask_dir=True, use_img_regex_for_masks=True)
+				datasets[name].shuffle()
+				with save_f.open('wb') as f:
+					pickle.dump(datasets[name], f)
+			else:
+				print(f"{save_f} found, loading {name}.")
+				with save_f.open('rb') as f:
+					datasets[name] = pickle.load(f)  # Load Dataset from previous run to get consistent order in experiments
+
+			with tqdm_joblib(tqdm(desc=f"Reading Images and GTs from {name}", total=len(datasets[name]))):
+				images[name], gts[name] = zip(*Parallel(n_jobs=-1)(
+					delayed(self._read_img_and_gt)(sample)
+					for sample in datasets[name]
 				))
 
+			# Baseline recognition experiments with GT masks
+			self._evaluate_recognition(images[name], gts[name], save_f.with_stem('Recognition'))
+
 		models = list(self.models.iterdir())
-		with tqdm(models, desc="Evaluating models") as model_pbar:
-			for self._model in model_pbar:
-				model_pbar.set_postfix(model=self._model.name)
-				model_leave = self._model == models[-1]
+		with tqdm(models, desc="Evaluating models") as tqdm_models:
+			for self._model in tqdm_models:
+				tqdm_models.set_postfix(model=self._model.name)
+				tqdm_models_leave = self._model == models[-1]
 
 				tt_configs = list(it.product(TRAIN_DATASETS, TEST_DATASETS))
-				with tqdm(tt_configs, desc="On train/test configuration", leave=model_leave) as data_pbar:
-					for self._train, self._test in data_pbar:
-						data_pbar.set_postfix(train=self._train, test=self._test)
-						data_leave = model_leave and (self._train, self._test) == tt_configs[-1]
+				with tqdm(tt_configs, desc="On train/test configuration", leave=tqdm_models_leave) as tqdm_data:
+					for self._train, self._test in tqdm_data:
+						tqdm_data.set_postfix(train=self._train, test=self._test)
+						tqdm_data_leave = tqdm_models_leave and (self._train, self._test) == tt_configs[-1]
 
 						self._predictions = self._model/self._train/self._test/'Predictions'
 						self._binarised = self._model/self._train/self._test/'Binarised'
-						save_f = self._model/f'Pickles/{self._train}_{self._test}.pkl'
-						# Check if pickle already exists
-						if not self.extra.get('overwrite', False) and save_f.is_file():
+						seg_save = self._model/f'Pickles/{self._train}_{self._test}_Segmentation.pkl'
+						rec_save = self._model/f'Pickles/{self._train}_{self._test}_Recognition.pkl'
+
+						# Check if both pickles already exist
+						if not self.overwrite and seg_save.is_file() and rec_save.is_file():
 							continue
-						save_f.parent.mkdir(parents=True, exist_ok=True)
+
+						# Make sure the necessary directories exist
 						if not self._predictions.is_dir():
 							raise ValueError(f"{self._predictions} is not a directory.")
 						if not self._binarised.is_dir():
 							raise ValueError(f"{self._binarised} is not a directory.")
 
-						# Read predictions
-						with tqdm_joblib(tqdm(datasets[self._test], desc="Reading predictions", leave=data_leave)) as data:
-							pred_bin = dzip(datasets[self._test], Parallel(n_jobs=-1)(
-								delayed(self._read_image)(gt_sample)
+						with tqdm_joblib(tqdm(datasets[self._test], desc="Reading predictions", leave=tqdm_data_leave)) as data:
+							pred_bin = Parallel(n_jobs=-1)(
+								delayed(self._read_predictions)(gt_sample)
 								for gt_sample in data
-							))
-						# This will filter out non-existing predictions, so the code will still work, but missing predictions should be addressed (otherwise evaluation is unfair)
-						pred_bin_gt = {sample: (*pred_bin[sample], gts[self._test][sample]) for sample in datasets[self._test] if pred_bin[sample] is not None}
-
-						# Evaluate predictions against the ground truths
-						with tqdm_joblib(tqdm(list(pred_bin_gt.values()), desc="Computing metrics", leave=data_leave)) as data:
-							evals_and_plots = Parallel(n_jobs=-1)(
-								delayed(self._evaluate_and_plot)(pred, bin_, gt)
-								for pred, bin_, gt in data
 							)
 
-						evals = {pb: {metric: np.array([ep[pb][metric].mean for ep in evals_and_plots]) for metric in evals_and_plots[0][pb].keys()} for pb in range(2)}
-						plots = lmap(op.itemgetter(2), evals_and_plots)
-						mean_plot = Plot.mean_and_std(plots, self.threshold)
+						# This will filter out non-existing predictions, so the code will still work,
+						# but missing predictions should be addressed (otherwise evaluation is unfair)
+						pred_bin_gt = [(*pb, gt) for pb, gt in zip(pred_bin, gts[self._test]) if pb is not None]
 
-						# Save results to pickle file
-						with open(save_f, 'wb') as f:
-							pickle.dump(list(pred_bin_gt.keys()), f)
-							pickle.dump(evals, f)
-							pickle.dump(plots, f)
-							pickle.dump(mean_plot, f)
+						self._evaluate_segmentation(datasets[self._test], pred_bin_gt, seg_save, tqdm_data_leave)
+						self._evaluate_recognition(datasets[self._test], images[self._test], lmap(op.itemgetter(1), pred_bin_gt), rec_save, tqdm_data_leave)
 
 	def _open_img(self, f, convert=None):
 		img = Image.open(f)
-		if self.resize:
-			img = img.resize(self.resize)
 		if convert:
 			img = img.convert(convert)
+		if self.resize:
+			img = img.resize(self.resize)
 		return img
 
-	def _load_gt(self, gt_sample):
-		return np.array(self._open_img(gt_sample.f, '1'), dtype=np.bool_).flatten()
+	def _read_img_and_gt(self, sample):
+		return (
+			np.array(self._open_img(sample.f, 'RGB')) / 255,
+			np.array(self._open_img(sample.mask, '1'), dtype=np.bool_)
+		)
 
-	def _read_image(self, gt_sample):
-		pred_f = self._predictions/gt_sample.f.relative_to(self.gt/self._test)
-		bin_f = self._binarised/gt_sample.f.relative_to(self.gt/self._test)
+	def _read_predictions(self, sample):
+		pred_f = self._predictions/sample.f.relative_to(self.images/self._test)
+		bin_f = self._binarised/sample.f.relative_to(self.images/self._test)
 		if not pred_f.is_file():
 			for ext in '.jpg', '.jpeg', '.png':
 				pred_f = pred_f.with_suffix(ext)
@@ -145,13 +168,39 @@ class Main:
 				print(f"Missing binarised file {bin_f}.", file=sys.stderr)
 				return None
 
-		pred = np.array(self._open_img(pred_f, 'L')).flatten() / 255
-		bin_ = np.array(self._open_img(bin_f, '1'), dtype=np.bool_).flatten()
+		pred = np.array(self._open_img(pred_f, 'L')) / 255
+		bin_ = np.array(self._open_img(bin_f, '1'), dtype=np.bool_)
 		return pred, bin_
 
-	def _evaluate_and_plot(self, pred, bin_, gt):
+	def _evaluate_segmentation(self, pred_bin_gt, save_f, leave_pbar=True):
+		if not self.overwrite and save_f.is_file():
+			return
+		save_f.parent.mkdir(parents=True, exist_ok=True)
+
+		# Evaluate predictions against the ground truths
+		with tqdm_joblib(tqdm(pred_bin_gt, desc="Computing segmentation metrics", leave=leave_pbar)) as data:
+			evals_and_plots = Parallel(n_jobs=-1)(
+				delayed(self._segmentation_metrics_for_sample)(pred, bin_, gt)
+				for pred, bin_, gt in data
+			)
+
+		evals = [{
+			metric: np.array([ep[pb][metric].mean for ep in evals_and_plots])
+			for metric in evals_and_plots[0][pb].keys()
+		} for pb in range(2)]
+		plots = lmap(op.itemgetter(2), evals_and_plots)
+		mean_plot = Plot.mean_and_std(plots, self.threshold)
+
+		# Save results to pickle file
+		with save_f.open('wb') as f:
+			pickle.dump(evals, f)
+			pickle.dump(plots, f)
+			pickle.dump(mean_plot, f)
+
+	def _segmentation_metrics_for_sample(self, pred, bin_, gt):
 		pred_eval = BinaryIntensitySegmentationEvaluation()
 		bin_eval = BinarySegmentationEvaluation()
+		pred, bin_, gt = pred.flatten(), bin_.flatten(), gt.flatten()
 
 		# Edge case
 		if not np.any(pred):
@@ -207,17 +256,56 @@ class Main:
 
 		return pred_eval, bin_eval, plot
 
+	def _evaluate_recognition(self, images, masks, save_f, leave_pbar=True):
+		if not self.overwrite and save_f.is_file():
+			return
+		save_f.parent.mkdir(parents=True, exist_ok=True)
+
+		with tqdm_joblib(tqdm(lzip(images, masks), desc="Masking images", leave=leave_pbar)) as data:
+			images = Parallel(n_jobs=-1)(
+				delayed(self._mask_and_resize_img)(img, mask)
+				for img, mask in data
+			)
+
+		features = {}
+		for name, method in self.rec_models.items():
+			#if isinstance(method, KerasModel):
+				# Probably can't use ScleraNet with joblib
+			#	features[name] = method.extract_features(images)
+			#else:
+				with tqdm_joblib(tqdm(images, desc=f"Computing {method} features", leave=leave_pbar)) as data:
+					features[name] = Parallel(n_jobs=-1)(
+						delayed(method.extract_features)(img)
+						for img in data
+					)
+
+		with tqdm_joblib(tqdm(desc="Computing distance matrices", total=len(self.rec_models), leave=leave_pbar)):
+			dist_matrices = dzip(self.rec_models, Parallel(n_jobs=len(self.rec_models))(
+				delayed(method.dist_matrix)(features[name])
+				for name, method in self.rec_models.items()
+			))
+
+		# Save results to pickle file
+		with open(save_f, 'wb') as f:
+			pickle.dump(dist_matrices, f)
+
+	def _mask_and_resize_img(self, img, mask):
+		img = img.copy()
+		img[~mask] = 0
+		return img.resize(REC_SIZE)
+
 	def process_command_line_options(self):
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
 		ap.add_argument('models', type=Path, nargs='?', default=self.models,
 		                help="directory with all model predictions - should contain a separate folder for each model with 'Predictions' and 'Binarised' inside")
-		ap.add_argument('gt', type=Path, nargs='?', default=self.gt, help="directory with ground truth masks")
+		ap.add_argument('datasets', type=Path, nargs='?', default=self.datasets, help="directory with the original datasets")
+		ap.add_argument('scleranet', type=Path, nargs='?', default=self.scleranet, help="path to file with saved ScleraNet weights")
 		ap.add_argument('-r', '--resize', type=int, nargs=2, help="width and height to resize the images to")
+		ap.add_argument('-o', '--overwrite', action='store_true', help="overwrite existing data")
 		ap.parse_known_args(namespace=self)
 
 		ap = argparse.ArgumentParser(description="Extra keyword arguments.")
 		ap.add_argument('-e', '--extra', nargs=2, action='append', help="any extra keyword-value argument pairs")
-		ap.add_argument('-o', '--overwrite', action='store_true', help="overwrite existing data")
 		ap.parse_known_args(namespace=self.extra)
 
 		if self.extra.extra:
@@ -303,13 +391,22 @@ class GUI(Tk):
 		self.models_btn.grid(column=4, row=row)
 
 		row += 1
-		self.gt_lbl = Label(self.frame, text="GT:")
-		self.gt_lbl.grid(column=0, row=row, sticky='w')
-		self.gt_txt = Entry(self.frame, width=60)
-		self.gt_txt.insert(END, self.args.gt)
-		self.gt_txt.grid(column=1, columnspan=3, row=row)
-		self.gt_btn = Button(self.frame, text="Browse", command=self.browse_gt)
-		self.gt_btn.grid(column=4, row=row)
+		self.datasets_lbl = Label(self.frame, text="Datasets:")
+		self.datasets_lbl.grid(column=0, row=row, sticky='w')
+		self.datasets_txt = Entry(self.frame, width=60)
+		self.datasets_txt.insert(END, self.args.datasets)
+		self.datasets_txt.grid(column=1, columnspan=3, row=row)
+		self.datasets_btn = Button(self.frame, text="Browse", command=self.browse_datasets)
+		self.datasets_btn.grid(column=4, row=row)
+
+		row += 1
+		self.scleranet_lbl = Label(self.frame, text="ScleraNet weights:")
+		self.scleranet_lbl.grid(column=0, row=row, sticky='w')
+		self.scleranet_txt = Entry(self.frame, width=60)
+		self.scleranet_txt.insert(END, self.args.scleranet)
+		self.scleranet_txt.grid(column=1, columnspan=3, row=row)
+		self.scleranet_btn = Button(self.frame, text="Browse", command=self.browse_scleranet)
+		self.scleranet_btn.grid(column=4, row=row)
 
 		row += 1
 		self.size_lbl = Label(self.frame, text="Size (WxH):")
@@ -327,7 +424,7 @@ class GUI(Tk):
 		self.chk_frame = Frame(self.frame)
 		self.chk_frame.grid(row=row, columnspan=3, sticky='w')
 		self.overwrite_var = BooleanVar()
-		self.overwrite_var.set(False)
+		self.overwrite_var.set(self.args.overwrite)
 		self.overwrite_chk = Checkbutton(self.chk_frame, text="Overwrite", variable = self.overwrite_var)
 		self.overwrite_chk.grid(sticky='w')
 
@@ -343,8 +440,11 @@ class GUI(Tk):
 	def browse_models(self):
 		self._browse_dir(self.models_txt)
 		
-	def browse_gt(self):
-		self._browse_dir(self.gt_txt)
+	def browse_datasets(self):
+		self._browse_dir(self.datasets_txt)
+		
+	def browse_scleranet(self):
+		self._browse_dir(self.scleranet_txt)
 
 	def _browse_dir(self, target_txt):
 		init_dir = target_txt.get()
@@ -370,9 +470,10 @@ class GUI(Tk):
 
 	def confirm(self):
 		self.args.models = Path(self.models_txt.get())
-		self.args.gt = Path(self.gt_txt.get())
-		self.args.resize = (int(self.width_txt.get()), int(self.height_txt.get())) if self.width_txt.get() and self.height_txt.get() else None
-		self.args.extra.overwrite = self.overwrite_var.get()
+		self.args.gt = Path(self.datasets_txt.get())
+		self.args.scleranet = Path(self.scleranet_txt.get())
+		self.args.resize = (int(w), int(h)) if (w := self.width_txt.get()) and (h := self.height_txt.get()) else None
+		self.args.overwrite = self.overwrite_var.get()
 
 		for kw in self.extra_frame.pairs:
 			key, value = kw.key_txt.get(), kw.value_txt.get()

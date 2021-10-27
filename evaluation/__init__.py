@@ -1,3 +1,5 @@
+#TODO: For EyeZ project, Metrics should be separated from RunningStats - they should only contain the computation stuff (or should they? The current setup makes it easy to store and print results. I should implement +-*/... operators, though, that work with the .mean attribute)
+# New idea: Have a Metric class that only defines the computation. Then subclass it with two subclasses: a) MetricVar class that (computes and) saves all values at initiation (and doesn't allow updates) as a numpy array and b) RunningMetric class that works like the current Metric class.
 from abc import ABC, abstractmethod
 import itertools as it
 from matej.collections import ensure_iterable
@@ -15,10 +17,12 @@ class Metric(RunningStats, ABC):
 
 	@abstractmethod
 	def __call__(self, *args, **kw):
-		pass
+		""" Override this method in subclasses with the actual computation of the metric. """
 
 	def compute_and_update(self, *args, **kw):
-		self.update(self(*args, **kw))
+		result = self(*args, **kw)
+		self.update(result)
+		return result
 
 
 class Evaluation(dict):
@@ -78,7 +82,7 @@ class Evaluation(dict):
 	def stds(self):
 		return {metric.name: metric.std for metric in self}
 
-	def arrays(self, n='all'):
+	def as_arrays(self, n='all'):
 		return {metric.name: np.array(metric.last(n)) for metric in self}
 
 

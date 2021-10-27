@@ -10,8 +10,9 @@ class BinarySegmentationEvaluation(Evaluation):
 
 
 class BinaryIntensitySegmentationEvaluation(BinarySegmentationEvaluation):
+	#TODO: For EyeZ probably some of the code from compute._segmentation_metrics_for_sample could be moved here (similar to VerificationMetric.error_rates_from_dist_matrix)
 	def __init__(self, *args, **kw):
-		super().__init__(AUC(**kw), *args, **kw)
+		super().__init__(AUC(**kw), *args)
 
 
 class IoU(Metric):
