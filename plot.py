@@ -14,8 +14,8 @@ import tkinter.filedialog as filedialog
 # Import whatever else is needed
 from compute import TRAIN_DATASETS, TEST_DATASETS, Plot  # Plot is needed for pickle loading
 from abc import ABC, abstractmethod
-from evaluation.segmentation import *
 from evaluation import def_tick_format
+from evaluation.recognition import *
 import itertools as it
 import logging
 import math
@@ -62,9 +62,9 @@ logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'Po
 class Main:
 	def __init__(self, *args, **kw):
 		# Default values
-		root = Path('')
-		self.models = Path(args[0] if len(args) > 0 else kw.get('models', root/'Models'))
-		self.save = Path(args[1] if len(args) > 1 else kw.get('save', 'Results'))
+		self.models = Path(args[0] if len(args) > 0 else kw.get('models', 'Models'))
+		self.datasets = Path(args[1] if len(args) > 1 else kw.get('datasets', 'Datasets'))
+		self.save = Path(args[2] if len(args) > 2 else kw.get('save', 'Results'))
 		self.k = kw.get('k', 5)
 		self.discard = kw.get('discard', {'GFCM1', 'GFCM2', 'HSFCM', 'I-FCM', 'RSKFCM'})
 		self.plot = kw.get('plot', False)
@@ -78,21 +78,27 @@ class Main:
 	def __call__(self):
 		if not self.models.is_dir():
 			raise ValueError(f"{self.models} is not a directory.")
+		if not self.datasets.is_dir():
+			raise ValueError(f"{self.datasets} is not a directory.")
 
 		self.eval_dir = self.save/'Evaluations'
 		self.fig_dir = self.save/'Figures'
 		self.eval_dir.mkdir(parents=True, exist_ok=True)
 		self.fig_dir.mkdir(parents=True, exist_ok=True)
 
-		plt.rcParams['font.family'] = 'Times New Roman'  # This doesn't work without MS fonts installed
+		plt.rcParams['font.family'] = 'Times New Roman'
 		plt.rcParams['font.weight'] = 'normal'
 		plt.rcParams['font.size'] = 24
 
-		self._samples = treedict()
+		self._samples = {}
 		self._results = treedict()
-		self._plots = treedict()
-		self._mean_plots = treedict()
-		self._hmeans = treedict()
+		for test_dir in self.datasets.iterdir():
+			test = test_dir.stem
+			with (test_dir/'Samples.pkl').open('rb') as f:
+				self._samples[test] = pickle.load(f)
+			with (test_dir/'Recognition.pkl').open('rb') as f:
+				self._results['dist'][test] = self._load(self.datasets/test, 'Recognition')
+
 		for model_dir in self.models.iterdir():
 			model = model_dir.name
 			if model in self.discard:
@@ -100,22 +106,26 @@ class Main:
 			for train, tests in TRAIN_TEST_DICT.items():
 				# Read results
 				for test in tests:
-					for collection, result in zip((self._samples, self._results, self._plots, self._mean_plots), self._load(model_dir, f'{train}_{test}')):
-						collection[model][train][test] = result
+					with (model_dir/f'Pickles/Segmentation/{train}_{test}.pkl').open('rb') as f:
+						for collection in ('seg', 'pr', 'mean_pr'):
+							self._results[collection][model][train][test] = pickle.load(f)
+					with (model_dir/f'Pickles/Recognition/{train}_{test}.pkl').open('rb') as f:
+						self._results['dist'][model][train][test] = pickle.load(f)
 
 				# Compute harmonic means
 				for pb in range(2):
-					for metric in next(iter(self._results[model][train].values()))[pb]:
-						self._hmeans[model][train][pb][metric] = harmonic_mean([self._results[model][train][t][pb][metric].mean() for t in tests])
+					for metric in next(iter(self._results['seg'][model][train].values()))[pb]:
+						self._results['hmean'][model][train][pb][metric] = harmonic_mean([self._results['seg'][model][train][t][pb][metric].mean() for t in tests])
 
 		print("Sorting models by the harmonic mean of their binary F1-Scores on the evaluation datasets")
-		self._sorted_models = sorted(self._results.keys(), key=lambda model: self._hmeans[model]['All'][1]['F1-score'], reverse=True)
+		self._sorted_models = sorted(self._results['seg'].keys(), key=lambda model: self._results['hmean'][model]['All'][1]['F1-score'], reverse=True)
 
 		self._experiment1()
 		for attr in ATTR_EXP:
 			self._experiment2(attr)
 		self._experiment3()
 		self._experiment4()
+		self._experiment5()
 
 		if self.plot:
 			plt.show()
@@ -128,20 +138,20 @@ class Main:
 		with (self.eval_dir/'LaTeX - Performance.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
 				for test in tests:
-					r = self._results[model]['All'][test]
+					r = self._results['seg'][model]['All'][test]
 					mean_std = [{metric: (r[pb][metric].mean(), r[pb][metric].std()) for metric in r[pb]} for pb in range(2)]
 					self._save_evals(mean_std, f'{model} - All - {test}')
-					self._latexify_evals(mean_std, self._hmeans[model]['All'], model, test, tests, latex)
+					self._latexify_evals(mean_std, self._results['hmean'][model]['All'], latex, model, test, tests)
 
 		# Plot overall performances to bar plot and P/R curves
 		with Bar('Overall', self.fig_dir, self._sorted_models, len(tests)) as bar:
 			for i, (test, bar_colour) in enumerate(colourise(tests)):
-				with ROC(test, self.fig_dir) as roc:
+				with PR(test, self.fig_dir) as roc:
 					for j, (model, roc_colour) in enumerate(colourise(self._sorted_models)):
-						mean_plot, lower_std, upper_std = self._mean_plots[model]['All'][test]
+						mean_plot, lower_std, upper_std = self._results['mean_pr'][model]['All'][test]
 
 						# Compute k-fold std
-						results = self._results[model]['All'][test][1]['F1-score'].copy()
+						results = self._results['seg'][model]['All'][test][1]['F1-score'].copy()
 						np.random.shuffle(results)
 						folds = np.array_split(results, self.k)
 						std = np.std(lmap(np.mean, folds))
@@ -161,7 +171,7 @@ class Main:
 			for model in self._sorted_models:
 				for train in TRAIN_TEST_DICT:
 					samples = self._samples[model][train]['MOBIUS']
-					f1scores = self._results[model][train]['MOBIUS'][1]['F1-score']
+					f1scores = self._results['seg'][model][train]['MOBIUS'][1]['F1-score']
 					possible_values = {attr: {getattr(sample, attr) for sample in samples} for attr in attrs}
 					groups = [  # List of 1D arrays. Each 1D array contains per-image F1s for a specific attribute value combination (such as light=natural, phone=iPhone)
 						f1scores[[i for i, sample in enumerate(samples) if all(getattr(sample, attr) == current_values[attr] for attr in attrs)]]
@@ -187,13 +197,13 @@ class Main:
 		with (self.eval_dir/'LaTeX - Bias - Test data.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
 				for train in trains:
-					groups = [self._results[model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
-					bias[model][train] = self._compute_biases(groups)
-					self._save_biases(bias[model][train], f'{model} - {train}')
-					self._latexify_biases(bias[model][train], latex, model, train, trains)
+					groups = [self._results['seg'][model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
+					bias[train][model] = self._compute_biases(groups)
+					self._save_biases(bias[train][model], f'{model} - {train}')
+					self._latexify_biases(bias[train][model], latex, model, train, trains)
 
 		for train in trains:
-			self._plot_biases({model: bias[model][train] for model in bias}, {model: self._hmeans[model][train][1]['F1-score'] for model in self._hmeans}, f"test data ({train})")
+			self._plot_biases(bias[train], {model: self._results['hmean'][model][train][1]['F1-score'] for model in self._results['hmean']}, f"test data ({train})")
 
 	def _experiment4(self):
 		print("Experiment 4: Bias across different training datasets")
@@ -204,7 +214,7 @@ class Main:
 		with (self.eval_dir/'LaTeX - Bias - Train data.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
 				for test in tests:
-					groups = [self._results[model][train][test][1]['F1-score'] for train in TRAIN_TEST_DICT]
+					groups = [self._results['seg'][model][train][test][1]['F1-score'] for train in TRAIN_TEST_DICT]
 					bias[model][test] = self._compute_biases(groups)
 					f1[model][test] = harmonic_mean(lmap(np.mean, groups))
 					self._save_biases(bias[model][test], f'{model} - {test}')
@@ -212,6 +222,30 @@ class Main:
 
 		for test in tests:
 			self._plot_biases({model: bias[model][test] for model in bias}, {model: f1[model][test] for model in f1}, f"train data ({test})")
+
+	def _experiment5(self):
+		print("Experiment 5: Recognition")
+
+		far_ver = treedict()
+		cmc_plots = treedict()
+		with (self.eval_dir/'LaTeX - Recognition.txt').open('w', encoding='utf-8') as latex:
+			for model in self._sorted_models:
+				for method, dist_matrix in self._results['dist'][model]['All']['MOBIUS'].items():
+					ver_eval = VerificationEvaluation()
+					id_eval = IdentificationEvaluation()
+
+					far, _, ver, _ = ver_eval.metrics_from_dist_matrix(dist_matrix, self._samples['MOBIUS'])
+					self._save_rec(ver_eval, id_eval, f'Recognition - {model} - {method}')
+					self._latexify_rec(ver_eval, id_eval, latex, model, method, list(self._results['dist'][model]['All']['MOBIUS']))
+
+					far_ver[method][model] = far, ver
+					cmc_plots[method][model] = ...
+
+		for method in far_ver:
+			with ROC(method, self.fig_dir) as roc, CMC(method, self.fig_dir) as cmc:
+				for model, colour in colourise(self._sorted_models):
+					roc.plot(*far_ver[method][model], label=model, colour=colour)
+					cmc.plot(cmc_plots[method][model], label=model, colour=colour)
 
 	def _load(self, model_dir, name):
 		f = model_dir/f'Pickles/{name}.pkl'
@@ -231,7 +265,7 @@ class Main:
 					print(f"{metric} (μ ± σ): {mean} ± {std}", file=f)
 				print(file=f)
 
-	def _latexify_evals(self, mean_std, hmean, model, test, tests, latex):
+	def _latexify_evals(self, mean_std, hmean, latex, model, test, tests):
 		if test == tests[0]:  # First line of model
 			latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{model}}}")
 		latex.write(f" & {tests if test == tests[0] else test.ljust(max(map(len, tests[1:])))}")
@@ -301,14 +335,36 @@ class Main:
 						for j, ((model, sc_colour), marker) in enumerate(zip(colourise(self._sorted_models), MARKERS)):
 							b = bias[model][strat][metric]
 							b_normalised_to_01 = b / max_bias[metric]  # Normalise bias to 0-1 range (for marker size in scatter plot)
-							b_normalised_to_stdmad = (b_normalised_to_01 * max(max_bias['σ'], max_bias['MAD'])) if metric not in ('σ', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
+							b_normalised_to_stdmad = b_normalised_to_01 * max(max_bias['σ'], max_bias['MAD']) if metric not in ('σ', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
 							bar.plot(b_normalised_to_stdmad, j, i, label=metric, colour=bar_colour)
 							scatter.plot(f1[model], b, label=model, colour=sc_colour, marker=marker)
 							size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=model, colour=sc_colour, marker=marker)
 
+	def _save_rec(self, ver_eval, id_eval, name):
+		save = self.eval_dir/f'{name}.txt'
+		print(f"Saving to {save}")
+		with save.open('w', encoding='utf-8') as f:
+			for vi_text, vi_eval in (("Verification", ver_eval), ("Identification", id_eval)):
+				print(vi_text, file=f)
+				print(vi_eval, file=f)
+				print(file=f)
+
+	def _latexify_rec(self, ver_eval, id_eval, latex, model, test, tests):
+		if test == tests[0]:  # First line of model
+			latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{model}}}")
+		latex.write(f" & {tests if test == tests[0] else test.ljust(max(map(len, tests[1:])))}")
+		for vi_eval, metrics in ((ver_eval, ('EER', 'VER@10%FAR', 'VER@1%FAR', 'AUC')), (id_eval, ('Rank-1', 'Rank-5', 'AUCMC'))):
+			for metric in metrics:
+				latex.write(f" & {fmt(vi_eval[metric].mean)} & ")
+		latex.write(r" \\")
+		if test == tests[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
+			latex.write(r"\hline")
+		latex.write("\n")
+
 	def process_command_line_options(self):
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
 		ap.add_argument('models', type=Path, nargs='?', default=self.models, help="directory with model information")
+		ap.add_argument('datasets', type=Path, nargs='?', default=self.datasets, help="directory with the original dataset pickles")
 		ap.add_argument('save', type=Path, nargs='?', default=self.save, help="directory to save figures and evaluations to")
 		ap.add_argument('-k', '--folds', type=int, default=self.k, help="number of folds to use for std")
 		ap.add_argument('-d', '--discard', action='append', type=str, help="discard model")
@@ -379,9 +435,9 @@ class Figure(ABC):
 		)
 
 
-class ROC(Figure):
+class PR(Figure):
 	def __init__(self, name, save_dir, fontsize=20):
-		super().__init__(f'ROC - {name}', save_dir, fontsize)
+		super().__init__(f'PR - {name}', save_dir, fontsize)
 		self.cmb_fig = None
 		self.cmb_ax = None
 		self.zoom_ax = None
@@ -587,6 +643,80 @@ class Scatter(Figure):
 		self.ymax = max(self.ymax, y)
 
 
+class ROC(Figure):
+	def __init__(self, name, save_dir, xlabel="FAR", ylabel="Vericiation", fontsize=20):
+		super().__init__(f'ROC - {name}', save_dir, fontsize)
+		self.xlabel = xlabel
+		self.ylabel = ylabel
+
+	def __enter__(self):
+		super().__enter__()
+		self.ax.grid(which='major', alpha=.5)
+		self.ax.grid(which='minor', alpha=.2)
+		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.margins(0)
+		self.ax.set_xlabel(self.xlabel)
+		self.ax.set_ylabel(self.ylabel)
+		self.fig.tight_layout(pad=0)
+		return self
+
+	def close(self, *args, **kw):
+		self.ax.set_xlim(0, 1.01)
+		self.ax.set_ylim(0, 1.01)
+		self.ax.xaxis.set_major_locator(MultipleLocator(.2))
+		#self.ax.xaxis.set_minor_locator(MultipleLocator(.1))
+		self.ax.yaxis.set_major_locator(MultipleLocator(.2))
+		#self.ax.yaxis.set_minor_locator(MultipleLocator(.1))
+		#self.save(f'{self.name} (No Legend)')
+
+		_, labels = self.ax.get_legend_handles_labels()
+		if labels:
+			ncol = (len(labels) - 1) // 10 + 1
+			self.ax.legend(bbox_to_anchor=(1.02, .5), ncol=ncol, loc='center left', borderaxespad=0)
+			self.save()
+
+	def plot(self, x, y, *, label=None, colour=None):
+		super().plot()
+		self.ax.plot(x, y, label=label, linewidth=2, color=colour)
+
+
+class CMC(Figure):
+	def __init__(self, name, save_dir, fontsize=20):
+		super().__init__(f'CMC - {name}', save_dir, fontsize)
+
+	def __enter__(self):
+		super().__enter__()
+		self.ax.grid(which='major', alpha=.5)
+		self.ax.grid(which='minor', alpha=.2)
+		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.margins(0)
+		self.ax.set_xlabel("n")
+		self.ax.set_ylabel("Rank-n accuracy")
+		self.fig.tight_layout(pad=0)
+		return self
+
+	def close(self, *args, **kw):
+		self.ax.set_xlim(0, 1.01)
+		self.ax.set_ylim(0, 1.01)
+		self.ax.xaxis.set_major_locator(MultipleLocator(.2))
+		#self.ax.xaxis.set_minor_locator(MultipleLocator(.1))
+		self.ax.yaxis.set_major_locator(MultipleLocator(.2))
+		#self.ax.yaxis.set_minor_locator(MultipleLocator(.1))
+		#self.save(f'{self.name} (No Legend)')
+
+		_, labels = self.ax.get_legend_handles_labels()
+		if labels:
+			ncol = (len(labels) - 1) // 10 + 1
+			self.ax.legend(bbox_to_anchor=(1.02, .5), ncol=ncol, loc='center left', borderaxespad=0)
+			self.save()
+
+	def plot(self, cmc, *, label=None, colour=None):
+		super().plot()
+		self.ax.plot(np.arange(len(cmc)), cmc, label=label, linewidth=2, color=colour)
+
+
 class GUI(Tk):
 	def __init__(self, argspace, *args, **kw):
 		super().__init__(*args, **kw)
@@ -605,6 +735,15 @@ class GUI(Tk):
 		self.models_txt.grid(column=1, columnspan=3, row=row)
 		self.models_btn = Button(self.frame, text="Browse", command=self.browse_models)
 		self.models_btn.grid(column=4, row=row)
+
+		row += 1
+		self.datasets_lbl = Label(self.frame, text="Datasets:")
+		self.datasets_lbl.grid(column=0, row=row, sticky='w')
+		self.datasets_txt = Entry(self.frame, width=60)
+		self.datasets_txt.insert(END, self.args.datasets)
+		self.datasets_txt.grid(column=1, columnspan=3, row=row)
+		self.datasets_btn = Button(self.frame, text="Browse", command=self.browse_datasets)
+		self.datasets_btn.grid(column=4, row=row)
 
 		row += 1
 		self.save_lbl = Label(self.frame, text="Save to:")
@@ -644,6 +783,9 @@ class GUI(Tk):
 		self._browse_dir(self.models_txt)
 
 	def browse_save(self):
+		self._browse_dir(self.datasets_txt)
+
+	def browse_save(self):
 		self._browse_dir(self.save_txt)
 
 	def _browse_dir(self, target_txt):
@@ -670,6 +812,7 @@ class GUI(Tk):
 
 	def confirm(self):
 		self.args.models = Path(self.models_txt.get())
+		self.args.datasets = Path(self.datasets_txt.get())
 		self.args.save = Path(self.save_txt.get())
 		self.args.plot = self.plot_var.get()
 
