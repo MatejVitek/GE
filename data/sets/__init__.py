@@ -164,7 +164,7 @@ class Dataset:
 		# If using image regex, each sample only has at most one corresponding mask so return those
 		# Otherwise, for each sample return a dictionary mapping mask channel to mask file
 		# If no matching masks were found for a sample, return None for it
-		return [cls.sample_cls(img_fs, mask_fs.get(f.stem, None)) for f in img_fs.values()]
+		return [cls.sample_cls(f, mask_fs.get(f.stem, None)) for f in img_fs.values()]
 
 	@classmethod
 	def _read_samples(cls, dir):

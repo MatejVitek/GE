@@ -5,9 +5,9 @@ import os
 from . import RecognitionModel
 
 
-class KerasModel(RecognitionModel):
+class KerasModel(RecognitionModel, supports_pickling=False):
 	def __init__(self, model_file):
 		self.model = load_model(model_file)
 
-	def extract_features(self, images):
-		return self.model.predict(np.stack(images), workers=len(os.sched_getaffinity(0)))  # This won't work on Windows, need a different way of determining available CPUs
+	def extract_features(self, images, **kw):
+		return self.model.predict(np.stack(images), workers=len(os.sched_getaffinity(0)), **kw)  # This won't work on Windows, need a different way of determining available CPUs

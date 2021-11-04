@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 from ast import literal_eval
-from matej.collections import DotDict, dzip, lmap, lzip
+from matej.collections import DotDict, dfilter, dzip, lmap, lzip
 from matej import make_module_callable
 from matej.parallel import tqdm_joblib
 import argparse
@@ -15,6 +15,7 @@ from joblib.parallel import Parallel, delayed
 from tqdm import tqdm
 
 # Import whatever else is needed
+import cv2
 import itertools as it
 import numpy as np
 import operator as op
@@ -60,22 +61,24 @@ class Main:
 
 		# Load recognition models
 		self.rec_models = {
-			#"ScleraNet": KerasModel(self.scleranet),
-			"SIFT": DescriptorModel('SIFT'),
-			"SURF": DescriptorModel('SURF'),
-			"ORB": DescriptorModel('ORB'),
-			"dSIFT": DescriptorModel('SIFT', dense=True)
+			#"ScleraNet": KerasModel(self.scleranet)} | {
+			model.name: model
+			for model in [DescriptorModel(*args) for args in (('SIFT',), ('SURF',), ('ORB',), ('SIFT', True))]
 		}
 
 		datasets = {}
 		images = {}
+		greyscales = {}
 		gts = {}
 		for name, dataset in TEST_DATASETS.items():
 			save_f = self.datasets/name/'Samples.pkl'
 			if self.overwrite or not save_f.is_file():
-				# Dataset may be in different order, so we have to redo all experiments
-				self.overwrite = True
-				print(f"{save_f} not found, reading {name} from scratch. Any previous experiments will be redone.")
+				if not self.overwrite:
+					# Dataset may be in different order (and we don't know the previous one), so we have to redo all its experiments
+					print(f"{save_f} not found, reading {name} from scratch. Any previous experiments will be redone.")
+					for model_dir in self.models.iterdir():
+						for f in (model_dir/'Pickles').glob(f'*_{name}_*.pkl'):
+							f.unlink()
 				datasets[name] = dataset.from_dir(self.datasets/name/'Images', mask_dir=True, use_img_regex_for_masks=True)
 				datasets[name].shuffle()
 				with save_f.open('wb') as f:
@@ -86,13 +89,14 @@ class Main:
 					datasets[name] = pickle.load(f)  # Load Dataset from previous run to get consistent order in experiments
 
 			with tqdm_joblib(tqdm(desc=f"Reading Images and GTs from {name}", total=len(datasets[name]))):
-				images[name], gts[name] = zip(*Parallel(n_jobs=-1)(
+				images[name], greyscales[name], gts[name] = zip(*Parallel(n_jobs=-1)(
 					delayed(self._read_img_and_gt)(sample)
 					for sample in datasets[name]
 				))
 
 			# Baseline recognition experiments with GT masks
-			self._evaluate_recognition(images[name], gts[name], save_f.with_stem('Recognition'))
+			# REQUIRES PYTHON>=3.9 self._evaluate_recognition(images[name], gts[name], save_f.with_stem('Recognition'))
+			self._evaluate_recognition(images[name], greyscales[name], gts[name], save_f.with_name('Recognition.pkl'))
 
 		models = list(self.models.iterdir())
 		with tqdm(models, desc="Evaluating models") as tqdm_models:
@@ -131,8 +135,8 @@ class Main:
 						# but missing predictions should be addressed (otherwise evaluation is unfair)
 						pred_bin_gt = [(*pb, gt) for pb, gt in zip(pred_bin, gts[self._test]) if pb is not None]
 
-						self._evaluate_segmentation(datasets[self._test], pred_bin_gt, seg_save, tqdm_data_leave)
-						self._evaluate_recognition(datasets[self._test], images[self._test], lmap(op.itemgetter(1), pred_bin_gt), rec_save, tqdm_data_leave)
+						self._evaluate_segmentation(pred_bin_gt, seg_save, tqdm_data_leave)
+						self._evaluate_recognition(images[self._test], greyscales[self._test], lmap(op.itemgetter(1), pred_bin_gt), rec_save, tqdm_data_leave)
 
 	def _open_img(self, f, convert=None):
 		img = Image.open(f)
@@ -143,14 +147,16 @@ class Main:
 		return img
 
 	def _read_img_and_gt(self, sample):
+		img = self._open_img(sample.f, 'RGB')
 		return (
-			np.array(self._open_img(sample.f, 'RGB')) / 255,
+			np.array(img) / 255,
+			np.array(img.convert('L'), dtype=np.uint8),
 			np.array(self._open_img(sample.mask, '1'), dtype=np.bool_)
 		)
 
 	def _read_predictions(self, sample):
-		pred_f = self._predictions/sample.f.relative_to(self.images/self._test)
-		bin_f = self._binarised/sample.f.relative_to(self.images/self._test)
+		pred_f = self._predictions/sample.f.relative_to(self.datasets/self._test/'Images')
+		bin_f = self._binarised/sample.f.relative_to(self.datasets/self._test/'Images')
 		if not pred_f.is_file():
 			for ext in '.jpg', '.jpeg', '.png':
 				pred_f = pred_f.with_suffix(ext)
@@ -256,34 +262,41 @@ class Main:
 
 		return pred_eval, bin_eval, plot
 
-	def _evaluate_recognition(self, images, masks, save_f, leave_pbar=True):
+	def _evaluate_recognition(self, images, greyscales, masks, save_f, leave_pbar=True):
 		if not self.overwrite and save_f.is_file():
 			return
 		save_f.parent.mkdir(parents=True, exist_ok=True)
 
-		with tqdm_joblib(tqdm(lzip(images, masks), desc="Masking images", leave=leave_pbar)) as data:
-			images = Parallel(n_jobs=-1)(
-				delayed(self._mask_and_resize_img)(img, mask)
-				for img, mask in data
-			)
+		if any(method.accepts_rgb_input for method in self.rec_models.values()):
+			with tqdm_joblib(tqdm(lzip(images, masks), desc="Masking images", leave=leave_pbar)) as data:
+				images = Parallel(n_jobs=-1)(
+					delayed(self._mask_and_resize_img)(img, mask)
+					for img, mask in data
+				)
 
-		features = {}
-		for name, method in self.rec_models.items():
-			#if isinstance(method, KerasModel):
-				# Probably can't use ScleraNet with joblib
-			#	features[name] = method.extract_features(images)
-			#else:
-				with tqdm_joblib(tqdm(images, desc=f"Computing {method} features", leave=leave_pbar)) as data:
-					features[name] = Parallel(n_jobs=-1)(
-						delayed(method.extract_features)(img)
-						for img in data
-					)
+		if any(not method.accepts_rgb_input for method in self.rec_models.values()):
+			with tqdm_joblib(tqdm(lzip(greyscales, masks), desc="Masking greyscale images", leave=leave_pbar)) as data:
+				images = Parallel(n_jobs=-1)(
+					delayed(self._mask_and_resize_img)(img, mask)
+					for img, mask in data
+				)
 
-		with tqdm_joblib(tqdm(desc="Computing distance matrices", total=len(self.rec_models), leave=leave_pbar)):
-			dist_matrices = dzip(self.rec_models, Parallel(n_jobs=len(self.rec_models))(
-				delayed(method.dist_matrix)(features[name])
-				for name, method in self.rec_models.items()
+		supports_pickling = dfilter(lambda x: x[1].supports_pickling, self.rec_models.items())
+		with tqdm_joblib(tqdm(supports_pickling.items(), desc="Computing parallelisable features", leave=leave_pbar)):
+			features = dzip(supports_pickling.keys(), Parallel(n_jobs=len(supports_pickling))(
+				delayed(self._extract_features)(method, images if method.accepts_rgb_input else greyscales)
+				for method in supports_pickling.values()
 			))
+
+		features.update({name: [
+			method.extract_features(img)
+			for img in tqdm(images if method.accepts_rgb_input else greyscales, desc=f"Computing {name} features", leave=leave_pbar)
+		] for name, method in self.rec_models.items() if not method.supports_pickling})
+
+		dist_matrices = {
+			name: method.dist_matrix(features[name], tqdm_leave_pbar=leave_pbar)
+			for name, method in tqdm(list(self.rec_models.items()), desc="Computing distance matrices", leave=leave_pbar)
+		}
 
 		# Save results to pickle file
 		with open(save_f, 'wb') as f:
@@ -293,6 +306,15 @@ class Main:
 		img = img.copy()
 		img[~mask] = 0
 		return img.resize(REC_SIZE)
+
+	def _extract_features(self, method, images):
+		return [method.extract_features(img) for img in images]
+
+	# Can't pickle recognition models so we have to override pickling
+	def __getstate__(self):
+		state = self.__dict__.copy()
+		del state['rec_models']
+		return state
 
 	def process_command_line_options(self):
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
@@ -472,7 +494,8 @@ class GUI(Tk):
 		self.args.models = Path(self.models_txt.get())
 		self.args.gt = Path(self.datasets_txt.get())
 		self.args.scleranet = Path(self.scleranet_txt.get())
-		self.args.resize = (int(w), int(h)) if (w := self.width_txt.get()) and (h := self.height_txt.get()) else None
+		# REQUIRES PYTHON>=3.8 self.args.resize = (int(w), int(h)) if (w := self.width_txt.get()) and (h := self.height_txt.get()) else None
+		self.args.resize = (int(self.width_txt.get()), int(self.height_txt.get())) if self.width_txt.get() and self.height_txt.get() else None
 		self.args.overwrite = self.overwrite_var.get()
 
 		for kw in self.extra_frame.pairs:
