@@ -112,8 +112,8 @@ class Main:
 
 						self._predictions = self._model/self._train/self._test/'Predictions'
 						self._binarised = self._model/self._train/self._test/'Binarised'
-						seg_save = self._model/f'Pickles/{self._train}_{self._test}_Segmentation.pkl'
-						rec_save = self._model/f'Pickles/{self._train}_{self._test}_Recognition.pkl'
+						seg_save = self._model/f'Pickles/Segmentation/{self._train}_{self._test}.pkl'
+						rec_save = self._model/f'Pickles/Recognition/{self._train}_{self._test}.pkl'
 
 						# Check if both pickles already exist
 						if not self.overwrite and seg_save.is_file() and rec_save.is_file():
