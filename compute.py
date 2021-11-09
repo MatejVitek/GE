@@ -76,6 +76,7 @@ class Main:
 				if not self.overwrite:
 					# Dataset may be in different order (and we don't know the previous one), so we have to redo all its experiments
 					print(f"{save_f} not found, reading {name} from scratch. Any previous experiments will be redone.")
+					save_f.with_name('Recognition.pkl').unlink()
 					for model_dir in self.models.iterdir():
 						for f in (model_dir/'Pickles').glob(f'*_{name}_*.pkl'):
 							f.unlink()
@@ -95,7 +96,7 @@ class Main:
 				))
 
 			# Baseline recognition experiments with GT masks
-			# REQUIRES PYTHON>=3.9 self._evaluate_recognition(images[name], gts[name], save_f.with_stem('Recognition'))
+			# REQUIRES PYTHON>=3.9 self._evaluate_recognition(images[name], greyscales[name], gts[name], save_f.with_stem('Recognition'))
 			self._evaluate_recognition(images[name], greyscales[name], gts[name], save_f.with_name('Recognition.pkl'))
 
 		models = list(self.models.iterdir())
