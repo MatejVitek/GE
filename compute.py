@@ -282,17 +282,10 @@ class Main:
 					for img, mask in data
 				)
 
-		supports_pickling = dfilter(lambda x: x[1].supports_pickling, self.rec_models.items())
-		with tqdm_joblib(tqdm(supports_pickling.items(), desc="Computing parallelisable features", leave=leave_pbar)):
-			features = dzip(supports_pickling.keys(), Parallel(n_jobs=len(supports_pickling))(
-				delayed(self._extract_features)(method, images if method.accepts_rgb_input else greyscales)
-				for method in supports_pickling.values()
-			))
-
-		features.update({name: [
+		features = {name: [
 			method.extract_features(img)
 			for img in tqdm(images if method.accepts_rgb_input else greyscales, desc=f"Computing {name} features", leave=leave_pbar)
-		] for name, method in self.rec_models.items() if not method.supports_pickling})
+		] for name, method in self.rec_models.items()}
 
 		dist_matrices = {
 			name: method.dist_matrix(features[name], tqdm_leave_pbar=leave_pbar)

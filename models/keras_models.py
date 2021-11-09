@@ -5,7 +5,7 @@ import os
 from . import RecognitionModel
 
 
-class KerasModel(RecognitionModel, supports_pickling=False):
+class KerasModel(RecognitionModel):
 	def __init__(self, model_file):
 		self.model = load_model(model_file)
 

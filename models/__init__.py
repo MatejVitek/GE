@@ -16,6 +16,5 @@ class RecognitionModel(ABC):
 	def dist_matrix(self, feature_vectors, **kw):
 		return cdist(feature_vectors, feature_vectors, metric=kw.get('metric', 'cosine'))
 
-	def __init_subclass__(cls, rgb=True, supports_pickling=True):
+	def __init_subclass__(cls, rgb=True):
 		cls.accepts_rgb_input = rgb
-		cls.supports_pickling = supports_pickling
