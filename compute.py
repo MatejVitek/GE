@@ -15,7 +15,6 @@ from joblib.parallel import Parallel, delayed
 from tqdm import tqdm
 
 # Import whatever else is needed
-import cv2
 import itertools as it
 import numpy as np
 import operator as op
@@ -76,6 +75,7 @@ class Main:
 				if not self.overwrite:
 					# Dataset may be in different order (and we don't know the previous one), so we have to redo all its experiments
 					print(f"{save_f} not found, reading {name} from scratch. Any previous experiments will be redone.")
+					# REQUIRES PYTHON>=3.9 save_f.with_stem('Recognition').unlink()
 					save_f.with_name('Recognition.pkl').unlink()
 					for model_dir in self.models.iterdir():
 						for f in (model_dir/'Pickles').glob(f'*_{name}_*.pkl'):

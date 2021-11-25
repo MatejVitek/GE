@@ -30,28 +30,34 @@ class Evaluation(dict):
 		super().__init__((metric.name, metric) for metric in it.chain(ensure_iterable(metrics), args))
 
 	def __str__(self):
-		return "\n".join(map(str, self.metrics))
+		return "\n".join(map(str, self))
 
 	def __delattr__(self, name):
-		item_name = self._find(name)
-		if item_name:
-			del self[item_name]
-		else:
-			raise AttributeError(f"No attribute called: {name}")
+		try:
+			return super().__delattr__(name)
+		except AttributeError as e:
+			actual_name = self._find(name)
+			if actual_name:
+				del self[actual_name]
+			else:
+				raise AttributeError(f"Attribute not found: {name}") from e
 
 	def __getattr__(self, name):
-		item_name = self._find(name)
-		if item_name:
-			return self[item_name]
-		else:
-			raise AttributeError(f"No attribute called: {name}")
+		try:
+			return super().__getattr__(name)
+		except AttributeError as e:
+			actual_name = self._find(name)
+			if actual_name:
+				return self[actual_name]
+			else:
+				raise AttributeError(f"Attribute not found: {name}") from e
 
 	def __setattr__(self, name, val):
-		item_name = self._find(name)
-		if item_name:
-			self[item_name] = val
+		actual_name = self._find(name)
+		if actual_name:
+			self[actual_name] = val
 		else:
-			self[name] = val
+			return super().__setattr__(name, val)
 
 	def _find(self, name):
 		if name in self:

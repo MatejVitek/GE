@@ -1,8 +1,6 @@
 import cv2
 from matej.collections import lzip
-from numba import njit, prange
 import numpy as np
-import time
 from tqdm import tqdm
 
 from . import RecognitionModel
@@ -40,20 +38,13 @@ class DescriptorModel(RecognitionModel, rgb=False):
 			for x in range(0, img.shape[1], step)
 		])[1]
 
-	@njit(parallel=True)
 	def dist_matrix(self, descriptors, **kw):
 		matrix = np.zeros((len(descriptors), len(descriptors)))  # Diagonal will stay 0 (since those are self-comparisons)
 		idx = np.triu_indices_from(matrix, 1)  # Indices for upper triangle to be filled with distances
-		# matrix[idx] = [  # Compute distances and fill upper triangle of distance matrix
-		# 	self._dist(descriptors[i], descriptors[j])
-		# 	for i, j in tqdm(lzip(*idx), desc=f"Computing {self.name} dist matrix rows", leave=kw.get('tqdm_leave_pbar', True))
-		# ]
-		start = time.time()
-		idx = lzip(*idx)
-		for p in prange(len(idx)):
-			i, j = idx[p]
-			matrix[i,j] = self._dist(descriptors[i], descriptors[j])
-		print(f"Time for matrix computation: {time.time() - start}s")
+		matrix[idx] = [  # Compute distances and fill upper triangle of distance matrix
+			self._dist(descriptors[i], descriptors[j])
+			for i, j in tqdm(lzip(*idx), desc=f"Computing {self.name} dist matrix", leave=kw.get('tqdm_leave_pbar', True))
+		]
 		matrix[np.isnan(matrix)] = 1  # Replace NaNs with maximal distance
 		matrix += matrix.T  # Copy upper triangle to lower triangle (since diagonal is 0, we don't need to worry about it))
 		return matrix
