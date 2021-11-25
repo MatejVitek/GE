@@ -5,15 +5,19 @@ import os
 import sys
 from pathlib import Path
 from ast import literal_eval
+from joblib import delayed, Parallel
 from matej import make_module_callable
 from matej.collections import DotDict, dzip, ensure_iterable, flatten, lmap, shuffled, treedict
+from matej.parallel import tqdm_joblib
 import argparse
 from tkinter import *
 import tkinter.filedialog as filedialog
+from tqdm import tqdm
 
 # Import whatever else is needed
 from compute import TRAIN_DATASETS, TEST_DATASETS, Plot  # Plot is needed for pickle loading
 from abc import ABC, abstractmethod
+from data.sets.mobius import Light
 from evaluation import def_tick_format
 from evaluation.recognition import *
 import itertools as it
@@ -23,6 +27,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
 import numpy as np
+import operator as op
 import pickle
 from statistics import harmonic_mean
 
@@ -83,8 +88,12 @@ class Main:
 
 		self.eval_dir = self.save/'Evaluations'
 		self.fig_dir = self.save/'Figures'
+		self.latex_dir = self.save/'LaTeX'
+		self.pkl_dir = self.save/'Pickles'
 		self.eval_dir.mkdir(parents=True, exist_ok=True)
 		self.fig_dir.mkdir(parents=True, exist_ok=True)
+		self.latex_dir.mkdir(parents=True, exist_ok=True)
+		self.pkl_dir.mkdir(parents=True, exist_ok=True)
 
 		plt.rcParams['font.family'] = 'Times New Roman'
 		plt.rcParams['font.weight'] = 'normal'
@@ -97,7 +106,7 @@ class Main:
 			with (test_dir/'Samples.pkl').open('rb') as f:
 				self._samples[test] = pickle.load(f)
 			with (test_dir/'Recognition.pkl').open('rb') as f:
-				self._results['dist'][test] = self._load(self.datasets/test, 'Recognition')
+				self._results['dist'][test] = pickle.load(f)
 
 		for model_dir in self.models.iterdir():
 			model = model_dir.name
@@ -106,36 +115,45 @@ class Main:
 			for train, tests in TRAIN_TEST_DICT.items():
 				# Read results
 				for test in tests:
-					with (model_dir/f'Pickles/Segmentation/{train}_{test}.pkl').open('rb') as f:
-						for collection in ('seg', 'pr', 'mean_pr'):
-							self._results[collection][model][train][test] = pickle.load(f)
-					with (model_dir/f'Pickles/Recognition/{train}_{test}.pkl').open('rb') as f:
-						self._results['dist'][model][train][test] = pickle.load(f)
+					try:
+						with (model_dir/f'Pickles/Segmentation/{train}_{test}.pkl').open('rb') as f:
+							for collection in ('seg', 'pr', 'mean_pr'):
+								self._results[collection][model][train][test] = pickle.load(f)
+					except IOError:
+						print(f"Missing segmentation results for {model} ({train} - {test})")
+					try:
+						with (model_dir/f'Pickles/Recognition/{train}_{test}.pkl').open('rb') as f:
+							self._results['dist'][model][train][test] = pickle.load(f)
+					except IOError:
+						print(f"Missing recognition results for {model} ({train} - {test})")
 
 				# Compute harmonic means
-				for pb in range(2):
-					for metric in next(iter(self._results['seg'][model][train].values()))[pb]:
-						self._results['hmean'][model][train][pb][metric] = harmonic_mean([self._results['seg'][model][train][t][pb][metric].mean() for t in tests])
+				try:
+					for pb in range(2):
+						for metric in next(iter(self._results['seg'][model][train].values()))[pb]:
+							self._results['hmean'][model][train][pb][metric] = harmonic_mean([self._results['seg'][model][train][t][pb][metric].mean() for t in tests])
+				except (StopIteration, AttributeError):
+					print("Cannot compute harmonic mean for non-existent segmentation results")
 
 		print("Sorting models by the harmonic mean of their binary F1-Scores on the evaluation datasets")
 		self._sorted_models = sorted(self._results['seg'].keys(), key=lambda model: self._results['hmean'][model]['All'][1]['F1-score'], reverse=True)
 
-		self._experiment1()
-		for attr in ATTR_EXP:
-			self._experiment2(attr)
-		self._experiment3()
-		self._experiment4()
+		# self._experiment1()
+		# for attr in ATTR_EXP:
+		# 	self._experiment2(attr)
+		# self._experiment3()
+		# self._experiment4()
 		self._experiment5()
 
 		if self.plot:
 			plt.show()
 
 	def _experiment1(self):
-		print("Experiment 1: Overall performance")
+		print("Experiment 1: Overall performance", flush=True)
 		tests = TRAIN_TEST_DICT['All']
 
 		# Save and latexify overall performances
-		with (self.eval_dir/'LaTeX - Performance.txt').open('w', encoding='utf-8') as latex:
+		with (self.latex_dir/'Performance.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
 				for test in tests:
 					r = self._results['seg'][model]['All'][test]
@@ -163,14 +181,14 @@ class Main:
 	def _experiment2(self, attrs):
 		attrs = ensure_iterable(attrs, True)
 		name = ", ".join(f"{attr.title()}s" for attr in attrs)
-		print(f"Experiment 2: Bias across different {name}")
+		print(f"Experiment 2: Bias across different {name}", flush=True)
 
 		bias = {}
 		f1 = {}
-		with (self.eval_dir/f'LaTeX - Bias - {name}.txt').open('w', encoding='utf-8') as latex:
+		with (self.latex_dir/f'Bias - {name}.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
 				for train in TRAIN_TEST_DICT:
-					samples = self._samples[model][train]['MOBIUS']
+					samples = self._samples['MOBIUS']
 					f1scores = self._results['seg'][model][train]['MOBIUS'][1]['F1-score']
 					possible_values = {attr: {getattr(sample, attr) for sample in samples} for attr in attrs}
 					groups = [  # List of 1D arrays. Each 1D array contains per-image F1s for a specific attribute value combination (such as light=natural, phone=iPhone)
@@ -190,11 +208,11 @@ class Main:
 		self._plot_biases(bias, f1, name)
 
 	def _experiment3(self):
-		print("Experiment 3: Bias across different evaluation datasets")
+		print("Experiment 3: Bias across different evaluation datasets", flush=True)
 		trains = [train for train in TRAIN_TEST_DICT if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD so we can consistently compute bias on 3 evaluation datasets
 
 		bias = treedict()
-		with (self.eval_dir/'LaTeX - Bias - Test data.txt').open('w', encoding='utf-8') as latex:
+		with (self.latex_dir/'Bias - Test data.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
 				for train in trains:
 					groups = [self._results['seg'][model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
@@ -206,7 +224,7 @@ class Main:
 			self._plot_biases(bias[train], {model: self._results['hmean'][model][train][1]['F1-score'] for model in self._results['hmean']}, f"test data ({train})")
 
 	def _experiment4(self):
-		print("Experiment 4: Bias across different training datasets")
+		print("Experiment 4: Bias across different training datasets", flush=True)
 		tests = [test for test in TEST_DATASETS if test != 'SMD']  # Skip SMD so we can consistently compute bias on 5 training configurations
 
 		bias = treedict()
@@ -224,36 +242,48 @@ class Main:
 			self._plot_biases({model: bias[model][test] for model in bias}, {model: f1[model][test] for model in f1}, f"train data ({test})")
 
 	def _experiment5(self):
-		print("Experiment 5: Recognition")
+		print("Experiment 5: Recognition", flush=True)
+		train_test_configs = ('All', 'MOBIUS'), ('MASD+SBVPI', 'SMD'), ('All', 'SLD')  # For SMD we can't use the 'All' model, as that was trained on SMD data
+		tests = lmap(op.itemgetter(1), train_test_configs)
+		models = ['Ground truth'] + self._sorted_models
 
-		far_ver = treedict()
-		cmc_plots = treedict()
-		with (self.eval_dir/'LaTeX - Recognition.txt').open('w', encoding='utf-8') as latex:
-			for model in self._sorted_models:
-				for method, dist_matrix in self._results['dist'][model]['All']['MOBIUS'].items():
-					ver_eval = VerificationEvaluation()
-					id_eval = IdentificationEvaluation()
+		saved_evals = treedict()
+		for train, test in train_test_configs:
+			for model in models:
+				results = self._results['dist'][test] if model == 'Ground truth' else self._results['dist'][model][train][test]
+				save_f = self.pkl_dir/f'{test} - {model}.pkl'
+				if not save_f.is_file():
+					with tqdm_joblib(tqdm(total=len(results), desc="Computing verification metrics")):
+						evals = Parallel(n_jobs=len(results))(
+							delayed(self._evaluate_method)(self._samples[test], dist_matrix, folds=5)
+							for dist_matrix in results.values()
+						)
+					save_f.parent.mkdir(parents=True, exist_ok=True)
+					print(f"Saving evals to {save_f}")
+					with save_f.open('wb') as f:
+						pickle.dump(evals, f)
+				else:
+					print(f"Loading evals from {save_f}")
+					with save_f.open('rb') as f:
+						evals = pickle.load(f)
 
-					far, _, ver, _ = ver_eval.metrics_from_dist_matrix(dist_matrix, self._samples['MOBIUS'])
-					self._save_rec(ver_eval, id_eval, f'Recognition - {model} - {method}')
-					self._latexify_rec(ver_eval, id_eval, latex, model, method, list(self._results['dist'][model]['All']['MOBIUS']))
+				for method, (eval_, cross_eval) in zip(results, evals):
+					self._save_rec(cross_eval, f'Recognition - {model} - {method} - {test}')
+					saved_evals[method][model][test] = eval_, cross_eval
 
-					far_ver[method][model] = far, ver
-					cmc_plots[method][model] = ...
+		for method in saved_evals:
+			with (self.latex_dir/f'Recognition - {method}.txt').open('w', encoding='utf-8') as latex:
+				for test in tests:
+					for model in models:
+						_, cross_eval = saved_evals[method][model][test]
+						self._latexify_rec(cross_eval, latex, test, tests, model, models)
 
-		for method in far_ver:
-			with ROC(method, self.fig_dir) as roc, CMC(method, self.fig_dir) as cmc:
-				for model, colour in colourise(self._sorted_models):
-					roc.plot(*far_ver[method][model], label=model, colour=colour)
-					cmc.plot(cmc_plots[method][model], label=model, colour=colour)
-
-	def _load(self, model_dir, name):
-		f = model_dir/f'Pickles/{name}.pkl'
-		if not f.is_file():
-			raise ValueError(f"{f} does not exist")
-		print(f"Loading data from {f}")
-		with open(f, 'rb') as f:
-			return [pickle.load(f) for _ in range(4)]
+		for test in tests:
+			for method in saved_evals:
+				with ROC(f'{test} - {method}', self.fig_dir) as roc:
+					for model, colour in colourise(models):
+						eval_, _ = saved_evals[method][model][test]
+						roc.plot(eval_.far, eval_.ver, label=model, colour=colour)
 
 	def _save_evals(self, mean_std, name):
 		save = self.eval_dir/f'{name}.txt'
@@ -340,24 +370,48 @@ class Main:
 							scatter.plot(f1[model], b, label=model, colour=sc_colour, marker=marker)
 							size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=model, colour=sc_colour, marker=marker)
 
-	def _save_rec(self, ver_eval, id_eval, name):
+	def _evaluate_method(self, samples, dist_matrix, folds=1):
+		print(dist_matrix.shape, len(samples))
+		# Gallery and probe
+		idx = shuffled(range(len(samples)))
+		idx = [i for i in idx if not hasattr(samples[i], 'light') or samples[i].light is Light.POOR or samples[i].n == 'bad']  # Filter out poorly lit images
+		gp_split = round(.3 * len(idx))
+		g_idx = idx[:gp_split]
+		p_idx = idx[gp_split:]
+		g_classes = [samples[i].label for i in g_idx]
+		p_classes = [samples[i].label for i in p_idx]
+		d = dist_matrix[np.ix_(g_idx, p_idx)]
+
+		# Overall evaluation
+		eval_ = VerificationEvaluation()
+		eval_.metrics_from_dist_matrix(d, g_classes, p_classes, balance_attempts=True)
+
+		if folds == 1:
+			return eval_
+
+		# Cross-evaluation
+		cross_eval = VerificationEvaluation()
+		for fold in np.array_split(p_idx, folds):
+			p_classes = [samples[i].label for i in fold]
+			d = dist_matrix[np.ix_(g_idx, fold)]
+			cross_eval.metrics_from_dist_matrix(d, g_classes, p_classes, balance_attempts=True)
+
+		return eval_, cross_eval
+
+	def _save_rec(self, ver_eval, name):
 		save = self.eval_dir/f'{name}.txt'
 		print(f"Saving to {save}")
 		with save.open('w', encoding='utf-8') as f:
-			for vi_text, vi_eval in (("Verification", ver_eval), ("Identification", id_eval)):
-				print(vi_text, file=f)
-				print(vi_eval, file=f)
-				print(file=f)
+			print(ver_eval, file=f)
 
-	def _latexify_rec(self, ver_eval, id_eval, latex, model, test, tests):
-		if test == tests[0]:  # First line of model
-			latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{model}}}")
-		latex.write(f" & {tests if test == tests[0] else test.ljust(max(map(len, tests[1:])))}")
-		for vi_eval, metrics in ((ver_eval, ('EER', 'VER@10%FAR', 'VER@1%FAR', 'AUC')), (id_eval, ('Rank-1', 'Rank-5', 'AUCMC'))):
-			for metric in metrics:
-				latex.write(f" & {fmt(vi_eval[metric].mean)} & ")
+	def _latexify_rec(self, ver_eval, latex, test, tests, model, models):
+		if model == models[0]:  # First line of model
+			latex.write(fr"\multirow{{{len(models)}}}{{*}}{{{test}}}")
+		latex.write(f" & {model if model == models[0] else model.ljust(max(map(len, models[1:])))}")
+		for metric in ('EER', 'VER@1%FAR', 'VER@10%FAR', 'AUC'):
+			latex.write(f" & ${fmt(ver_eval[metric].mean)} \pm {fmt(ver_eval[metric].std)}$")
 		latex.write(r" \\")
-		if test == tests[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
+		if model == models[-1] and test != tests[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
 		latex.write("\n")
 
@@ -431,7 +485,8 @@ class Figure(ABC):
 		diff = max_ - min_
 		return min(
 			oom(diff) * np.array([.1, .2, .5, 1, 2, 5]),  # Different possible tick sizes
-			key=lambda tick_size: (max(0, min_ticks - (n_ticks := diff // tick_size + 1), n_ticks - max_ticks), n_ticks)  # Return the one closest to the requested number of ticks. If several are in the range, return the one with the fewest ticks.
+			# REQUIRES PYTHON>=3.8 key=lambda tick_size: (max(0, min_ticks - (n_ticks := diff // tick_size + 1), n_ticks - max_ticks), n_ticks)  # Return the one closest to the requested number of ticks. If several are in the range, return the one with the fewest ticks.
+			key=lambda tick_size: (max(0, min_ticks - diff // tick_size - 1, diff // tick_size + 1 - max_ticks), diff // tick_size + 1)
 		)
 
 
