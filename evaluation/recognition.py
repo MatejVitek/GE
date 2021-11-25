@@ -1,3 +1,4 @@
+from matej.collections import shuffle, tzip
 import numpy as np
 import sklearn.metrics as skmetrics
 
@@ -12,7 +13,7 @@ class VerificationEvaluation(Evaluation):
 		self.ver = None
 		self.threshold = None
 
-	def metrics_from_dist_matrix(self, dist_matrix, r_classes=None, c_classes=None, closest_only=False, *, attempts=None, compute_metrics=True, threshold_points=1000):
+	def metrics_from_dist_matrix(self, dist_matrix, r_classes=None, c_classes=None, closest_only=False, *, attempts=None, balance_attempts=False, compute_metrics=True, threshold_points=1000):
 		"""
 		Compute and return FAR, FRR, VER at various threshold values. Also compute all verification metrics.
 
@@ -23,9 +24,10 @@ class VerificationEvaluation(Evaluation):
 								   will be disregarded (to avoid comparing a sample to itself).
 		:param Iterable closest_only: In each probe attempt only the closest gallery sample for each gallery class will be considered.
 		:param Iterable attempts: authentication attempts passed as tuples (row, column, same_class)
+		:param bool balance_attempts: whether to balance genuine/impostor attempts (I should delete this one for EyeZ, since it's covered by attempts)
 		:param bool compute_metrics: whether verification metrics should be computed and updated in this `Evaluation`.
 		:param int threshold_points: number of points to use for the threshold.
-		                             If 0, all unique points in the distance matrix will be used.
+		                             If 0, all unique points in the distance matrix will be used (can be very slow).
 		"""
 
 		if attempts is None:
@@ -38,7 +40,7 @@ class VerificationEvaluation(Evaluation):
 				disregard_diagonal = True
 
 			if (len(r_classes), len(c_classes)) != dist_matrix.shape:
-				raise ValueError("Dimensions of classes and dist matrix must match.")
+				raise ValueError(f"Dimensions of classes {(len(r_classes), len(c_classes))} and dist matrix {dist_matrix.shape} must match.")
 
 			if closest_only:
 				classes = set(c_classes)
@@ -68,11 +70,14 @@ class VerificationEvaluation(Evaluation):
 		# Edge case handling
 		self.threshold = np.unique(np.concatenate(([-1e-8], self.threshold, [1.])))
 
-		same = dist_matrix[[(r, c) for r, c, s in attempts if s]]
-		diff = dist_matrix[[(r, c) for r, c, s in attempts if not s]]
+		genuine_distances = dist_matrix[tzip(*((r, c) for r, c, s in attempts if s))]
+		impostor_distances = dist_matrix[tzip(*((r, c) for r, c, s in attempts if not s))]
 
-		self.far = np.array([np.count_nonzero(diff <= t) / len(diff) for t in self.threshold])
-		self.frr = np.array([np.count_nonzero(same > t) / len(same) for t in self.threshold])
+		if balance_attempts:
+			genuine_distances, impostor_distances = zip(*zip(shuffle(genuine_distances), shuffle(impostor_distances)))
+
+		self.far = np.array([np.count_nonzero(impostor_distances <= t) / len(impostor_distances) for t in self.threshold])
+		self.frr = np.array([np.count_nonzero(genuine_distances > t) / len(genuine_distances) for t in self.threshold])
 		self.ver = 1 - self.frr
 
 		if compute_metrics:
@@ -163,7 +168,8 @@ class VER_AT_FAR(Metric):
 
 
 class AUC(Metric):
-	__call__ = skmetrics.auc
+	def __call__(self, far, ver):
+		return skmetrics.auc(far, ver)
 
 
 class Rank(Metric):
