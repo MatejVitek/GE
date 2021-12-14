@@ -2,7 +2,7 @@
 # New idea: Have a Metric class that only defines the computation. Then subclass it with two subclasses: a) MetricVar class that (computes and) saves all values at initiation (and doesn't allow updates) as a numpy array and b) RunningMetric class that works like the current Metric class.
 from abc import ABC, abstractmethod
 import itertools as it
-from matej.collections import ensure_iterable
+from matej.collections import ensure_iterable, union
 from matej.math import RunningStats
 import numpy as np
 import re
@@ -26,8 +26,11 @@ class Metric(RunningStats, ABC):
 
 
 class Evaluation(dict):
-	def __init__(self, metrics, *args):
-		super().__init__((metric.name, metric) for metric in it.chain(ensure_iterable(metrics), args))
+	def __init__(self, *metrics):
+		if metrics:
+			super().__init__((metric.name, metric) for metric in it.chain(ensure_iterable(metrics[0]), metrics[1:]))
+		else:
+			super().__init__()
 
 	def __str__(self):
 		return "\n".join(map(str, self))
@@ -90,6 +93,13 @@ class Evaluation(dict):
 
 	def as_arrays(self, n='all'):
 		return {metric.name: np.array(metric.last(n)) for metric in self}
+
+	@classmethod
+	def from_evals(cls, evals):
+		e = cls()
+		for metric in evals[0].keys():
+			e[metric] = union(eval_[metric] for eval_ in evals)
+		return e
 
 
 def def_tick_format(x, _):

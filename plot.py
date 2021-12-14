@@ -7,7 +7,7 @@ from pathlib import Path
 from ast import literal_eval
 from joblib import delayed, Parallel
 from matej import make_module_callable
-from matej.collections import DotDict, dzip, ensure_iterable, flatten, lmap, shuffled, treedict
+from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lmap, shuffled, treedict
 from matej.parallel import tqdm_joblib
 import argparse
 from tkinter import *
@@ -52,6 +52,8 @@ model_complexity = {
 	'sclerasegnet': (59e6, 17.94e9),
 	'sclerau-net2': (3e6, 180e9)
 }
+for cluster in 'CGANs2020CL+ScleraU-Net2', 'RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN', 'RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraSegNet+ScleraMaskRCNN', 'RGB-SS-Eye-MS+CGANs2020CL+ScleraU-Net2+MU-Net':
+	model_complexity[cluster.lower()] = sum(model_complexity[model][0] for model in cluster.lower().split('+')), None
 
 # Auxiliary stuff
 TRAIN_TEST_DICT = {train: [test for test in TEST_DATASETS if test not in train and not (train == 'All' and test == 'SMD')] for train in TRAIN_DATASETS}  # Filter out invalid train-test configurations
@@ -60,7 +62,6 @@ FIG_EXTS = ensure_iterable(FIG_EXTS, True)
 colourise = lambda x: zip(x, CMAP(np.linspace(0, 1, len(x))))
 fmt = lambda x: np.format_float_positional(x, precision=3, unique=False)
 oom = lambda x: 10 ** math.floor(math.log10(x))  # Order of magnitude: oom(0.9) = 0.1, oom(30) = 10
-dict_product = lambda d: (dzip(d, x) for x in it.product(*d.values()))  # {a: [1, 2], b: [3, 4]} --> [{a: 1, b: 3}, {a: 1, b: 4}, {a: 2, b: 3}, {a: 2, b: 4}]
 logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'PostScript backend' not in record.getMessage())  # Suppress matplotlib warnings about .eps transparency
 
 
@@ -138,12 +139,13 @@ class Main:
 		print("Sorting models by the harmonic mean of their binary F1-Scores on the evaluation datasets")
 		self._sorted_models = sorted(self._results['seg'].keys(), key=lambda model: self._results['hmean'][model]['All'][1]['F1-score'], reverse=True)
 
-		# self._experiment1()
-		# for attr in ATTR_EXP:
-		# 	self._experiment2(attr)
-		# self._experiment3()
-		# self._experiment4()
+		self._experiment1()
+		for attr in ATTR_EXP:
+			self._experiment2(attr)
+		self._experiment3()
+		self._experiment4()
 		self._experiment5()
+		self._experiment6()
 
 		if self.plot:
 			plt.show()
@@ -280,10 +282,54 @@ class Main:
 
 		for test in tests:
 			for method in saved_evals:
-				with ROC(f'{test} - {method}', self.fig_dir) as roc:
+				with ROC(f'{test} - {method}', self.fig_dir, xscale='log') as roc:
 					for model, colour in colourise(models):
 						eval_, _ = saved_evals[method][model][test]
 						roc.plot(eval_.far, eval_.ver, label=model, colour=colour)
+
+	def _experiment6(self):
+		print("Experiment 6: Recognition on bias groups", flush=True)
+		train_test_configs = ('All', 'MOBIUS'), ('MASD+SBVPI', 'SMD'), ('All', 'SLD')  # For SMD we can't use the 'All' model, as that was trained on SMD data
+		tests = lmap(op.itemgetter(1), train_test_configs)
+		bias_clusters = {
+			'Eye colours': (('ScleraMaskRCNN',), ('CGANs2020CL', 'ScleraU-Net2'), ('RGB-SS-Eye-MS', 'FCN8', 'ScleraSegNet', 'MU-Net')),
+			'Evaluation data': (('RGB-SS-Eye-MS', 'CGANs2020CL', 'FCN8', 'ScleraSegNet', 'ScleraMaskRCNN'), ('ScleraU-Net2',), ('MU-Net',)),
+			'Lightings': (('ScleraU-Net2',), ('RGB-SS-Eye-MS', 'CGANs2020CL', 'FCN8', 'ScleraSegNet', 'MU-Net'), ('ScleraMaskRCNN',)),
+			'Phones': (('RGB-SS-Eye-MS', 'CGANs2020CL', 'ScleraU-Net2', 'MU-Net', 'ScleraMaskRCNN'), ('FCN8', 'ScleraSegNet')),
+			'Training data': (('FCN8',), ('RGB-SS-Eye-MS', 'CGANs2020CL', 'ScleraU-Net2', 'ScleraSegNet', 'ScleraMaskRCNN'), ('MU-Net',))
+		}
+
+		for bias_type, clusters in bias_clusters.items():
+			saved_evals = treedict()
+			for train, test in train_test_configs:
+				for c, cluster in enumerate(clusters, start=1):
+					for model in cluster:
+						with (self.pkl_dir/f'{test} - {model}.pkl').open('rb') as f:
+							for method, (eval_, cross_eval) in zip(self._results['dist'][test], pickle.load(f)):
+								if test not in saved_evals[method][cluster]:
+									saved_evals[method][cluster][test] = []
+								saved_evals[method][cluster][test].append((cross_eval, eval_.far, eval_.ver))
+
+					for method in saved_evals:
+						cross_eval = Evaluation.from_evals(lmap(op.itemgetter(0), saved_evals[method][cluster][test]))
+						far = np.stack(lmap(op.itemgetter(1), saved_evals[method][cluster][test])).mean(axis=0)
+						ver = np.stack(lmap(op.itemgetter(2), saved_evals[method][cluster][test])).mean(axis=0)
+						saved_evals[method][cluster][test] = cross_eval, far, ver
+						self._save_rec(cross_eval, f'Recognition across {bias_type} - Cluster {c} - {method} - {test}')
+
+			for method in saved_evals:
+				with (self.latex_dir/f'Recognition across {bias_type} - {method}.txt').open('w', encoding='utf-8') as latex:
+					for test in tests:
+						for c, cluster in enumerate(clusters, start=1):
+							cross_eval, _, _ = saved_evals[method][cluster][test]
+							self._latexify_rec(cross_eval, latex, test, tests, f'Cluster {c}', [f'Cluster {x+1}' for x in range(len(clusters))])
+
+			for test in tests:
+				for method in saved_evals:
+					with ROC(f'{bias_type} - {test} - {method}', self.fig_dir, xscale='log') as roc:
+						for c, (cluster, colour) in enumerate(colourise(clusters), start=1):
+							_, far, ver = saved_evals[method][cluster][test]
+							roc.plot(far, ver, label=f'Cluster {c}', colour=colour)
 
 	def _save_evals(self, mean_std, name):
 		save = self.eval_dir/f'{name}.txt'
@@ -361,17 +407,18 @@ class Main:
 				for i, (metric, bar_colour) in enumerate(colourise(metrics)):
 					max_bias = {metric: max(bias[model][strat][metric] for model in self._sorted_models) for metric in metrics}
 					with Scatter(f'Bias ({metric}) across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) as scatter, \
-						Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log') as size:
+						Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) as size:  # Params as circle sizes
+						#Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log', xlabel="# Parameters", ylabel="F1-score") as size:  # Params on x axis
 						for j, ((model, sc_colour), marker) in enumerate(zip(colourise(self._sorted_models), MARKERS)):
 							b = bias[model][strat][metric]
 							b_normalised_to_01 = b / max_bias[metric]  # Normalise bias to 0-1 range (for marker size in scatter plot)
 							b_normalised_to_stdmad = b_normalised_to_01 * max(max_bias['σ'], max_bias['MAD']) if metric not in ('σ', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
 							bar.plot(b_normalised_to_stdmad, j, i, label=metric, colour=bar_colour)
 							scatter.plot(f1[model], b, label=model, colour=sc_colour, marker=marker)
-							size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=model, colour=sc_colour, marker=marker)
+							#size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=model, colour=sc_colour, marker=marker)
+							size.plot(f1[model], b, math.sqrt(model_complexity[model.lower()][0]), label=model, colour=sc_colour, marker=marker)
 
 	def _evaluate_method(self, samples, dist_matrix, folds=1):
-		print(dist_matrix.shape, len(samples))
 		# Gallery and probe
 		idx = shuffled(range(len(samples)))
 		idx = [i for i in idx if not hasattr(samples[i], 'light') or samples[i].light is Light.POOR or samples[i].n == 'bad']  # Filter out poorly lit images
@@ -409,7 +456,7 @@ class Main:
 			latex.write(fr"\multirow{{{len(models)}}}{{*}}{{{test}}}")
 		latex.write(f" & {model if model == models[0] else model.ljust(max(map(len, models[1:])))}")
 		for metric in ('EER', 'VER@1%FAR', 'VER@10%FAR', 'AUC'):
-			latex.write(f" & ${fmt(ver_eval[metric].mean)} \pm {fmt(ver_eval[metric].std)}$")
+			latex.write(fr" & ${fmt(ver_eval[metric].mean)} \pm {fmt(ver_eval[metric].std)}$")
 		latex.write(r" \\")
 		if model == models[-1] and test != tests[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
@@ -643,7 +690,7 @@ class Bar(Figure):
 
 
 class Scatter(Figure):
-	def __init__(self, name, save_dir, xlabel="# Parameters", ylabel="F1-score", xscale='linear', fontsize=28):
+	def __init__(self, name, save_dir, xlabel="F1-score", ylabel="Bias", xscale='linear', fontsize=28):
 		super().__init__(f'Scatter - {name}', save_dir, fontsize)
 		self.xscale = xscale
 		self.xmin = self.xmax = self.ymin = self.ymax = None
@@ -699,15 +746,17 @@ class Scatter(Figure):
 
 
 class ROC(Figure):
-	def __init__(self, name, save_dir, xlabel="FAR", ylabel="Vericiation", fontsize=20):
+	def __init__(self, name, save_dir, xlabel="FAR", ylabel="Verification", xscale='linear', fontsize=20):
 		super().__init__(f'ROC - {name}', save_dir, fontsize)
 		self.xlabel = xlabel
 		self.ylabel = ylabel
+		self.xscale = xscale
 
 	def __enter__(self):
 		super().__enter__()
 		self.ax.grid(which='major', alpha=.5)
 		self.ax.grid(which='minor', alpha=.2)
+		self.ax.set_xscale(self.xscale)
 		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
 		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
 		self.ax.margins(0)
@@ -717,10 +766,14 @@ class ROC(Figure):
 		return self
 
 	def close(self, *args, **kw):
-		self.ax.set_xlim(0, 1.01)
+		if self.xscale == 'log':
+			self.ax.set_xlim(10e-5, 1.01)
+			self.ax.set_xticks(np.logspace(-5, 0, 6))
+		else:
+			self.ax.set_xlim(0, 1.01)
+			self.ax.xaxis.set_major_locator(MultipleLocator(.2))
+			#self.ax.xaxis.set_minor_locator(MultipleLocator(.1))
 		self.ax.set_ylim(0, 1.01)
-		self.ax.xaxis.set_major_locator(MultipleLocator(.2))
-		#self.ax.xaxis.set_minor_locator(MultipleLocator(.1))
 		self.ax.yaxis.set_major_locator(MultipleLocator(.2))
 		#self.ax.yaxis.set_minor_locator(MultipleLocator(.1))
 		#self.save(f'{self.name} (No Legend)')
