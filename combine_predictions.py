@@ -93,31 +93,33 @@ class Main(DotDict):
 	##############################
 
 	def __call__(self):
-		for cluster in (
-			('CGANs2020CL', 'ScleraU-Net2'),
-			('RGB-SS-Eye-MS', 'CGANs2020CL', 'FCN8', 'ScleraMaskRCNN'),
-			('RGB-SS-Eye-MS', 'CGANs2020CL', 'FCN8', 'ScleraSegNet', 'ScleraMaskRCNN'),
-			('RGB-SS-Eye-MS', 'CGANs2020CL', 'ScleraU-Net2', 'MU-Net'),
+		for ensemble in (
+			(('RGB-SS-Eye-MS', .726), ('ScleraU-Net2', .74), ('FCN8', .8)),  # Eye colour  (can try all MOBIUS clusters with all attributes tbh)
+			(('RGB-SS-Eye-MS', .778), ('CGANs2020CL', .765), ('FCN8', .741), ('ScleraMaskRCNN', .535)),  # Evaluation data
+			(('RGB-SS-Eye-MS', .726), ('ScleraU-Net2', .74), ('FCN8', .8), ('ScleraSegNet', .748)),  # Lighting
+			(('RGB-SS-Eye-MS', .726), ('ScleraU-Net2', .74), ('ScleraSegNet', .748)),  # Phone
+			(('ScleraU-Net2', .742), ('FCN8', .741), ('ScleraMaskRCNN', .535)),  # Training data
 		):
-			cluster_dir = self.models/"+".join(cluster)
-			cluster_dir.mkdir(parents=True, exist_ok=True)
-			filelist_dir = self.models/cluster[0]
+			ensemble_dir = self.models/"+".join(model for model, _ in ensemble)
+			ensemble_dir.mkdir(parents=True, exist_ok=True)
+			filelist_dir = self.models/ensemble[0][0]
 			filelist = [f for f in filelist_dir.rglob('*.png') if 'Binarised' not in str(f)]
 
-			with tqdm_joblib(tqdm(filelist, desc=f"Combining {cluster}")):
+			with tqdm_joblib(tqdm(filelist, desc=f"Combining {ensemble}")):
 				Parallel(n_jobs=-1)(
-					delayed(self._process_image)(f.relative_to(filelist_dir), cluster, cluster_dir)
+					delayed(self._process_image)(f.relative_to(filelist_dir), ensemble, ensemble_dir)
 					for f in filelist
 				)
 
-	def _process_image(self, relative_f, cluster, cluster_dir):
-		pred_f = cluster_dir/relative_f
+	def _process_image(self, relative_f, ensemble, ensemble_dir):
+		pred_f = ensemble_dir/relative_f
 		pred_f.parent.mkdir(parents=True, exist_ok=True)
 		bin_f = Path(str(pred_f).replace('Predictions', 'Binarised'))
 		bin_f.parent.mkdir(parents=True, exist_ok=True)
 
-		images = [np.array(Image.open(self.models/model/relative_f).convert('L').resize((480, 360)), dtype=float) for model in cluster]
-		combined = np.mean(images, axis=0).astype(np.uint8)
+		models, weights = zip(*ensemble)
+		images = [np.array(Image.open(self.models/model/relative_f).convert('L').resize((480, 360)), dtype=float) for model in models]
+		combined = np.average(images, axis=0, weights=weights).astype(np.uint8)
 
 		pred = Image.fromarray(combined)
 		bin_ = Image.fromarray(combined >= 128)
