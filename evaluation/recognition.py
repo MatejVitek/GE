@@ -8,6 +8,8 @@ from evaluation import Evaluation, Metric
 class VerificationEvaluation(Evaluation):
 	def __init__(self, *args, **kw):
 		super().__init__(EER(**kw), VER_AT_FAR(**kw), VER_AT_FAR(.1, **kw), AUC(**kw), *args)
+		self.genuine = None
+		self.impostors = None
 		self.far = None
 		self.frr = None
 		self.ver = None
@@ -70,14 +72,14 @@ class VerificationEvaluation(Evaluation):
 		# Edge case handling
 		self.threshold = np.unique(np.concatenate(([-1e-8], self.threshold, [1.])))
 
-		genuine_distances = dist_matrix[tzip(*((r, c) for r, c, s in attempts if s))]
-		impostor_distances = dist_matrix[tzip(*((r, c) for r, c, s in attempts if not s))]
+		self.genuine = dist_matrix[tzip(*((r, c) for r, c, s in attempts if s))]
+		self.impostors = dist_matrix[tzip(*((r, c) for r, c, s in attempts if not s))]
 
 		if balance_attempts:
-			genuine_distances, impostor_distances = zip(*zip(shuffle(genuine_distances), shuffle(impostor_distances)))
+			self.genuine, self.impostors = zip(*zip(shuffle(self.genuine), shuffle(self.impostors)))
 
-		self.far = np.array([np.count_nonzero(impostor_distances <= t) / len(impostor_distances) for t in self.threshold])
-		self.frr = np.array([np.count_nonzero(genuine_distances > t) / len(genuine_distances) for t in self.threshold])
+		self.far = np.array([np.count_nonzero(self.impostors <= t) / len(self.impostors) for t in self.threshold])
+		self.frr = np.array([np.count_nonzero(self.genuine > t) / len(self.genuine) for t in self.threshold])
 		self.ver = 1 - self.frr
 
 		if compute_metrics:
