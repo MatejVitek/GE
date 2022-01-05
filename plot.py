@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from ast import literal_eval
 from joblib import delayed, Parallel
+from matplotlib.lines import Line2D
 from matej import make_module_callable
 from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lmap, shuffled, treedict
 from matej.parallel import tqdm_joblib
@@ -52,8 +53,8 @@ model_complexity = {
 	'sclerasegnet': (59e6, 17.94e9),
 	'sclerau-net2': (3e6, 180e9)
 }
-for cluster in 'CGANs2020CL+ScleraU-Net2', 'RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN', 'RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraSegNet+ScleraMaskRCNN', 'RGB-SS-Eye-MS+CGANs2020CL+ScleraU-Net2+MU-Net':
-	model_complexity[cluster.lower()] = sum(model_complexity[model][0] for model in cluster.lower().split('+')), None
+for ensemble in ('RGB-SS-Eye-MS+ScleraU-Net2+FCN8', 'RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN', 'RGB-SS-Eye-MS+ScleraU-Net2+FCN8+ScleraSegNet', 'RGB-SS-Eye-MS+ScleraU-Net2+ScleraSegNet', 'ScleraU-Net2+FCN8+ScleraMaskRCNN'):
+	model_complexity[ensemble.lower()] = sum(model_complexity[model][0] for model in ensemble.lower().split('+')), None
 
 # Auxiliary stuff
 TRAIN_TEST_DICT = {train: [test for test in TEST_DATASETS if test not in train and not (train == 'All' and test == 'SMD')] for train in TRAIN_DATASETS}  # Filter out invalid train-test configurations
@@ -137,7 +138,11 @@ class Main:
 					print("Cannot compute harmonic mean for non-existent segmentation results")
 
 		print("Sorting models by the harmonic mean of their binary F1-Scores on the evaluation datasets")
-		self._sorted_models = sorted(self._results['seg'].keys(), key=lambda model: self._results['hmean'][model]['All'][1]['F1-score'], reverse=True)
+		self._sorted_models = sorted(
+			filter(lambda model: '+' not in model, self._results['seg']),
+			key=lambda model: self._results['hmean'][model]['All'][1]['F1-score'],
+			reverse=True
+		)
 
 		self._experiment1()
 		for attr in ATTR_EXP:
@@ -188,7 +193,14 @@ class Main:
 		bias = {}
 		f1 = {}
 		with (self.latex_dir/f'Bias - {name}.txt').open('w', encoding='utf-8') as latex:
-			for model in self._sorted_models:
+			models = list(self._sorted_models)
+			if 'colour' in attrs:
+				models.append('RGB-SS-Eye-MS+ScleraU-Net2+FCN8')
+			if 'light' in attrs:
+				models.append('RGB-SS-Eye-MS+ScleraU-Net2+FCN8+ScleraSegNet')
+			if 'phone' in attrs:
+				models.append('RGB-SS-Eye-MS+ScleraU-Net2+ScleraSegNet')
+			for model in models:
 				for train in TRAIN_TEST_DICT:
 					samples = self._samples['MOBIUS']
 					f1scores = self._results['seg'][model][train]['MOBIUS'][1]['F1-score']
@@ -215,7 +227,7 @@ class Main:
 
 		bias = treedict()
 		with (self.latex_dir/'Bias - Test data.txt').open('w', encoding='utf-8') as latex:
-			for model in self._sorted_models:
+			for model in self._sorted_models + ['RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN']:
 				for train in trains:
 					groups = [self._results['seg'][model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
 					bias[train][model] = self._compute_biases(groups)
@@ -232,7 +244,7 @@ class Main:
 		bias = treedict()
 		f1 = treedict()
 		with (self.eval_dir/'LaTeX - Bias - Train data.txt').open('w', encoding='utf-8') as latex:
-			for model in self._sorted_models:
+			for model in self._sorted_models + ['ScleraU-Net2+FCN8+ScleraMaskRCNN']:
 				for test in tests:
 					groups = [self._results['seg'][model][train][test][1]['F1-score'] for train in TRAIN_TEST_DICT]
 					bias[model][test] = self._compute_biases(groups)
@@ -282,10 +294,13 @@ class Main:
 
 		for test in tests:
 			for method in saved_evals:
-				with ROC(f'{test} - {method}', self.fig_dir, xscale='log') as roc:
+				with \
+					ROC(f'{test} - {method}', self.fig_dir, xscale='log') as roc, \
+					Histogram(f'{test} - {method}', self.fig_dir, xscale='invlog') as hist:
 					for model, colour in colourise(models):
 						eval_, _ = saved_evals[method][model][test]
 						roc.plot(eval_.far, eval_.ver, label=model, colour=colour)
+						hist.plot(eval_.genuine, eval_.impostors, label=model, colour=colour)
 
 	def _experiment6(self):
 		print("Experiment 6: Recognition on bias groups", flush=True)
@@ -308,28 +323,33 @@ class Main:
 							for method, (eval_, cross_eval) in zip(self._results['dist'][test], pickle.load(f)):
 								if test not in saved_evals[method][cluster]:
 									saved_evals[method][cluster][test] = []
-								saved_evals[method][cluster][test].append((cross_eval, eval_.far, eval_.ver))
+								saved_evals[method][cluster][test].append((cross_eval, eval_.far, eval_.ver, eval_.genuine, eval_.impostors))
 
 					for method in saved_evals:
 						cross_eval = Evaluation.from_evals(lmap(op.itemgetter(0), saved_evals[method][cluster][test]))
 						far = np.stack(lmap(op.itemgetter(1), saved_evals[method][cluster][test])).mean(axis=0)
 						ver = np.stack(lmap(op.itemgetter(2), saved_evals[method][cluster][test])).mean(axis=0)
-						saved_evals[method][cluster][test] = cross_eval, far, ver
+						genuine = np.hstack(lmap(op.itemgetter(3), saved_evals[method][cluster][test]))
+						impostors = np.hstack(lmap(op.itemgetter(4), saved_evals[method][cluster][test]))
+						saved_evals[method][cluster][test] = cross_eval, far, ver, genuine, impostors
 						self._save_rec(cross_eval, f'Recognition across {bias_type} - Cluster {c} - {method} - {test}')
 
 			for method in saved_evals:
 				with (self.latex_dir/f'Recognition across {bias_type} - {method}.txt').open('w', encoding='utf-8') as latex:
 					for test in tests:
 						for c, cluster in enumerate(clusters, start=1):
-							cross_eval, _, _ = saved_evals[method][cluster][test]
+							cross_eval, _, _, _, _ = saved_evals[method][cluster][test]
 							self._latexify_rec(cross_eval, latex, test, tests, f'Cluster {c}', [f'Cluster {x+1}' for x in range(len(clusters))])
 
 			for test in tests:
 				for method in saved_evals:
-					with ROC(f'{bias_type} - {test} - {method}', self.fig_dir, xscale='log') as roc:
+					with \
+						ROC(f'{bias_type} - {test} - {method}', self.fig_dir, xscale='log') as roc, \
+						Histogram(f'{bias_type} - {test} - {method}', self.fig_dir, xscale='invlog') as hist:
 						for c, (cluster, colour) in enumerate(colourise(clusters), start=1):
-							_, far, ver = saved_evals[method][cluster][test]
-							roc.plot(far, ver, label=f'Cluster {c}', colour=colour)
+							_, far, ver, genuine, impostors = saved_evals[method][cluster][test]
+							roc.plot(far, ver, label=f"Cluster {c}", colour=colour)
+							hist.plot(genuine, impostors, label=f"Cluster {c}", colour=colour)
 
 	def _save_evals(self, mean_std, name):
 		save = self.eval_dir/f'{name}.txt'
@@ -571,7 +591,7 @@ class PR(Figure):
 		#self.ax.xaxis.set_minor_locator(MultipleLocator(.1))
 		self.ax.yaxis.set_major_locator(MultipleLocator(.2))
 		#self.ax.yaxis.set_minor_locator(MultipleLocator(.1))
-		#self.save(f'{self.name} (No Legend)')
+		self.save(f'{self.name} (No Legend)')
 
 		_, labels = self.ax.get_legend_handles_labels()
 		if labels:
@@ -602,7 +622,7 @@ class PR(Figure):
 		self.zoom_ax.xaxis.set_minor_locator(MultipleLocator(.05))
 		self.zoom_ax.yaxis.set_major_locator(MultipleLocator(.1))
 		self.zoom_ax.yaxis.set_minor_locator(MultipleLocator(.05))
-		#self.save(f'{self.name} (Combined, No Legend)', self.cmb_fig)
+		self.save(f'{self.name} (Combined, No Legend)', self.cmb_fig)
 
 		if labels:
 			self.cmb_ax.legend(bbox_to_anchor=(2.2, .5), loc='center left', ncol=ncol, columnspacing=.5, borderaxespad=0)
@@ -727,7 +747,7 @@ class Scatter(Figure):
 		self.ax.set_ylim(max(0, ymin - ytick_size), ymax + ytick_size)
 		self.ax.yaxis.set_major_locator(MultipleLocator(ytick_size))
 		self.ax.yaxis.set_minor_locator(MultipleLocator(ytick_size / 2))
-		#self.save(f'{self.name} (No Legend)')
+		self.save(f'{self.name} (No Legend)')
 		if self.ax.get_legend_handles_labels()[0]:
 			self.ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
 		self.save()
@@ -776,7 +796,7 @@ class ROC(Figure):
 		self.ax.set_ylim(0, 1.01)
 		self.ax.yaxis.set_major_locator(MultipleLocator(.2))
 		#self.ax.yaxis.set_minor_locator(MultipleLocator(.1))
-		#self.save(f'{self.name} (No Legend)')
+		self.save(f'{self.name} (No Legend)')
 
 		_, labels = self.ax.get_legend_handles_labels()
 		if labels:
@@ -812,7 +832,7 @@ class CMC(Figure):
 		#self.ax.xaxis.set_minor_locator(MultipleLocator(.1))
 		self.ax.yaxis.set_major_locator(MultipleLocator(.2))
 		#self.ax.yaxis.set_minor_locator(MultipleLocator(.1))
-		#self.save(f'{self.name} (No Legend)')
+		self.save(f'{self.name} (No Legend)')
 
 		_, labels = self.ax.get_legend_handles_labels()
 		if labels:
@@ -823,6 +843,55 @@ class CMC(Figure):
 	def plot(self, cmc, *, label=None, colour=None):
 		super().plot()
 		self.ax.plot(np.arange(len(cmc)), cmc, label=label, linewidth=2, color=colour)
+
+
+class Histogram(Figure):
+	def __init__(self, name, save_dir, xlabel="Distance", ylabel="Frequency", xscale='linear', fontsize=20):
+		super().__init__(f'Histogram - {name}', save_dir, fontsize)
+		self.xlabel = xlabel
+		self.ylabel = ylabel
+		self.xscale = xscale
+
+	def __enter__(self):
+		super().__enter__()
+		self.ax.grid(which='major', alpha=.5)
+		self.ax.grid(which='minor', alpha=.2)
+		if self.xscale == 'invlog':
+			self.ax.set_xscale('function', functions=(lambda x: 10 ** x, np.log10))
+		else:
+			self.ax.set_xscale(self.xscale)
+		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.margins(0)
+		self.ax.set_xlabel(self.xlabel)
+		self.ax.set_ylabel(self.ylabel)
+		self.fig.tight_layout(pad=0)
+		return self
+
+	def close(self, *args, **kw):
+		if self.xscale == 'log':
+			self.ax.set_xlim(10e-5, 1.01)
+			self.ax.set_xticks(np.logspace(-5, 0, 6))
+		else:
+			self.ax.set_xlim(0, 1.01)
+			if self.xscale == 'invlog':
+				self.ax.set_xticks([0, .5, .8, .9, .95, 1])
+			else:
+				self.ax.xaxis.set_major_locator(MultipleLocator(.2))
+				#self.ax.xaxis.set_minor_locator(MultipleLocator(.1))
+		self.save(f'{self.name} (No Legend)')
+
+		gen_imp_legend = plt.legend(handles=[Line2D([0], [0], lw=2, ls='-', color='grey', label="Genuine"), Line2D([0], [0], lw=2, ls='--', color='grey', label="Impostors")], ncol=2, loc='upper center')
+		self.ax.add_artist(gen_imp_legend)
+		self.ax.legend(bbox_to_anchor=(.5, 1.02), ncol=2, loc='lower center', borderaxespad=0)
+		self.save()
+
+	def plot(self, genuine, impostors, *, label=None, colour=None, n_points=100):
+		super().plot()
+		for dist, l, ls in ((genuine, label, '-'), (impostors, None, '--')):
+			y, x = np.histogram(dist, n_points)
+			x = .5 * (x[:-1] + x[1:])
+			self.ax.plot(x, y, label=l, linewidth=1, linestyle=ls, color=colour)
 
 
 class GUI(Tk):
