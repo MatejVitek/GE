@@ -144,7 +144,8 @@ class Main:
 			reverse=True
 		)
 
-		#TODO: Draw the heatmaps for stratified/non-stratified experiments - the correlation might be different
+		self._bias_matrices = [[], [], []]
+
 		self._experiment1()
 		for attr in ATTR_EXP:
 			self._experiment2(attr)
@@ -152,6 +153,10 @@ class Main:
 		self._experiment4()
 		self._experiment5()
 		self._experiment6()
+
+		for strat in range(2):
+			with Heatmap("Overall (Stratified)" if strat else "Overall", self.fig_dir, self._bias_matrices[2]) as hmap:
+				hmap.plot(np.corrcoef(np.hstack(self._bias_matrices[strat])))
 
 		if self.plot:
 			plt.show()
@@ -441,6 +446,10 @@ class Main:
 							scatter.plot(f1[model], b, label=label, colour=sc_colour, marker=marker)
 							#size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=label, colour=sc_colour, marker=marker)
 							size.plot(f1[model], b, .01 * math.sqrt(model_complexity[model.lower()][0]), label=label, colour=sc_colour, marker=marker)
+			with Heatmap(fig_suffix, self.fig_dir, metrics) as hmap:
+				self._bias_matrices[strat].append(np.array([[bias[model][strat][metric] for model in models] for metric in metrics]))
+				hmap.plot(np.corrcoef(self._bias_matrices[strat][-1]))
+				self._bias_matrices[2] = metrics
 
 	def _evaluate_method(self, samples, dist_matrix, folds=1):
 		# Gallery and probe
@@ -563,8 +572,8 @@ class Figure(ABC):
 
 
 class PR(Figure):
-	def __init__(self, name, save_dir, *, fontsize=20):
-		super().__init__(name, save_dir/'PR', fontsize=fontsize)
+	def __init__(self, name, save_dir, **kw):
+		super().__init__(name, save_dir/'PR', **kw)
 		self.cmb_fig = None
 		self.cmb_ax = None
 		self.zoom_ax = None
@@ -897,6 +906,30 @@ class Histogram(Figure):
 			y, x = np.histogram(dist, n_points)
 			x = .5 * (x[:-1] + x[1:])
 			self.ax.plot(x, y, label=l, linewidth=1, linestyle=ls, color=colour)
+
+
+class Heatmap(Figure):
+	def __init__(self, name, save_dir, labels, *args, **kw):
+		super().__init__(name, save_dir/'Heatmap', *args, **kw)
+		self.labels = labels
+
+	def __enter__(self):
+		super().__enter__()
+		self.ax.margins(0)
+		self.fig.tight_layout(pad=0)
+		return self
+
+	def close(self, *args, **kw):
+		self.ax.set_xticks(range(len(self.labels)))
+		self.ax.set_yticks(range(len(self.labels)))
+		self.ax.set_xticklabels(self.labels)
+		self.ax.set_yticklabels(self.labels)
+		self.save()
+
+	def plot(self, matrix):
+		super().plot()
+		p = self.ax.matshow(matrix, vmin=-1, vmax=1, cmap='bwr')
+		self.fig.colorbar(p)
 
 
 class GUI(Tk):
