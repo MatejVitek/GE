@@ -103,7 +103,7 @@ class Evaluation(dict):
 
 
 def def_tick_format(x, _):
-	return np.format_float_positional(x, precision=3, trim='-')
+	return np.format_float_positional(x, precision=4, trim='-')
 
 
 from .segmentation import BinarySegmentationEvaluation, BinaryIntensitySegmentationEvaluation
