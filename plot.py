@@ -18,6 +18,7 @@ from tqdm import tqdm
 # Import whatever else is needed
 from compute import TRAIN_DATASETS, TEST_DATASETS, Plot  # Plot is needed for pickle loading
 from abc import ABC, abstractmethod
+import contextlib
 from data.sets.mobius import Light
 from evaluation import def_tick_format
 from evaluation.recognition import *
@@ -150,7 +151,7 @@ class Main:
 		for attr in ATTR_EXP:
 			self._experiment2(attr)
 		self._experiment3()
-		self._experiment4()
+		#self._experiment4()
 		self._experiment5()
 		self._experiment6()
 
@@ -228,21 +229,33 @@ class Main:
 		self._plot_biases(bias, f1, models, name)
 
 	def _experiment3(self):
-		print("Experiment 3: Bias across different evaluation datasets", flush=True)
-		trains = [train for train in TRAIN_TEST_DICT if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD so we can consistently compute bias on 3 evaluation datasets
+		#print("Experiment 3: Bias across different evaluation datasets", flush=True)
+		print("Experiment 3: Bias across different ethnicities", flush=True)
+		trains = [train for train in TRAIN_TEST_DICT if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD so we can consistently compute bias on all 3 evaluation datasets
+		sorted_trains = sorted(trains, key=lambda train: train.count('+'))
 		models = self._sorted_models# + ['RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN']
 
 		bias = treedict()
+		bias_delta = treedict()
 		with (self.latex_dir/'Bias - Test data.txt').open('w', encoding='utf-8') as latex:
 			for model in models:
 				for train in trains:
-					groups = [self._results['seg'][model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
+					#groups = [self._results['seg'][model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
+					groups = [
+						self._results['seg'][model][train]['MOBIUS'][1]['F1-score'],
+						np.hstack((self._results['seg'][model][train]['SMD'][1]['F1-score'], self._results['seg'][model][train]['SLD'][1]['F1-score']))
+					]
 					bias[train][model] = self._compute_biases(groups)
 					self._save_biases(bias[train][model], f'{model} - {train}')
 					self._latexify_biases(bias[train][model], latex, model, models, train, trains)
+				for strat in range(2):
+					for metric in bias[trains[0]][model][strat]:
+						bias_delta[model][strat][metric] = bias[sorted_trains[1]][model][strat][metric] - bias[sorted_trains[0]][model][strat][metric]
 
 		for train in trains:
-			self._plot_biases(bias[train], {model: self._results['hmean'][model][train][1]['F1-score'] for model in self._results['hmean']}, models, f"test data ({train})")
+			#self._plot_biases(bias[train], {model: self._results['hmean'][model][train][1]['F1-score'] for model in self._results['hmean']}, models, f"test data ({train})")
+			self._plot_biases(bias[train], {model: self._results['hmean'][model][train][1]['F1-score'] for model in self._results['hmean']}, models, f"ethnicities ({train})")
+		self._plot_biases(bias_delta, None, models, "ethnicities", plot_means=False)
 
 	def _experiment4(self):
 		print("Experiment 4: Bias across different training datasets", flush=True)
@@ -383,26 +396,23 @@ class Main:
 			latex.write(r"\hline")
 		latex.write("\n")
 
-	def _compute_biases(self, groups, n_samples=None):
-		# By default both stratified (with 100 samples per group) and non-stratified experiments will be run
-		if n_samples is None:
-			bias = self._compute_biases(groups, 100)
-			n_samples = 0
-		else:
-			bias = {}, {}
+	def _compute_biases(self, subject_groups):
+		# Both stratified (with size of smallest group rounded down to nearest 100) and non-stratified experiments will be run
+		n_samples = 100 * int(min(len(group) for group in subject_groups) / 100)
+		if n_samples == 0:
+			raise ValueError("Not enough samples to form stratified groups")
 
-		if n_samples:
-			groups = [np.random.choice(group, n_samples, False) for group in groups]  # List of 1D arrays of per-image F1s for stratified groups
-		group_means = np.array(lmap(np.mean, groups))  # 1D array of per-stratified-group mean F1s
-		group_stds = np.array(lmap(np.std, groups))  # 1D array of per-stratified-group σ of F1
-		control_groups = [list(it.islice(shuffled(list(flatten(groups))), len(group))) for group in groups]  # 2D list of per-image F1s across control groups
-		control_means = np.array(lmap(np.mean, control_groups))  # 1D array of per-control-group mean F1s
+		bias = {}, {}
+		for strat, groups in enumerate((subject_groups, [np.random.choice(group, n_samples, False) for group in subject_groups])):  # groups = list of 1D arrays of per-image F1s
+			group_means = np.array(lmap(np.mean, groups))  # 1D array of per-stratified-group mean F1s
+			group_stds = np.array(lmap(np.std, groups))  # 1D array of per-stratified-group σ of F1
+			control_groups = [list(it.islice(shuffled(list(flatten(groups))), len(group))) for group in groups]  # 2D list of per-image F1s across control groups
+			control_means = np.array(lmap(np.mean, control_groups))  # 1D array of per-control-group mean F1s
 
-		strat = bool(n_samples)  # Stratified?
-		bias[strat]['STD'] = group_means.std()  # Scalar σ of F1 means across groups
-		bias[strat]['MAD'] = np.mean(np.abs(group_means - group_means.mean()))  # Scalar mean absolute deviation of F1 means across groups
-		bias[strat]['CGD'] = bias[strat]['STD'] / control_means.std()  # Scalar ratio between σ of F1 means across groups and σ of F1 means across control groups
-		bias[strat]['FSD'] = bias[strat]['STD'] / group_stds.mean()  # Scalar ratio between σ of F1 means across groups and the mean σ of F1 within groups
+			bias[strat]['STD'] = group_means.std()  # Scalar σ of F1 means across groups
+			bias[strat]['MAD'] = np.mean(np.abs(group_means - group_means.mean()))  # Scalar mean absolute deviation of F1 means across groups
+			bias[strat]['CGD'] = bias[strat]['STD'] / control_means.std()  # Scalar ratio between σ of F1 means across groups and σ of F1 means across control groups
+			bias[strat]['FSD'] = bias[strat]['STD'] / group_stds.mean()  # Scalar ratio between σ of F1 means across groups and the mean σ of F1 within groups
 
 		return bias
 
@@ -426,28 +436,34 @@ class Main:
 			latex.write(r"\hline")
 		latex.write("\n")
 
-	def _plot_biases(self, bias, f1, models, fig_suffix):
+	def _plot_biases(self, bias, f1, models, fig_suffix, plot_means=True):
 		metrics = list(next(iter(bias.values()))[0])
 		labels = ["Ensemble" if '+' in model else model for model in models]
 		for strat in range(2):
 			if strat:
 				fig_suffix += " (Stratified)"
-			with Bar(f'Bias across {fig_suffix}', self.fig_dir, labels, len(metrics), ylabel="Bias") as bar:
+			prefix = "Bias Δ" if f1 is None else "Bias"
+			with Bar(f'{prefix} across {fig_suffix}', self.fig_dir, labels, len(metrics), ylabel=prefix) as bar:
+				biases = {metric: [bias[model][strat][metric] for model in models] for metric in metrics}
+				bias_range = {metric: (min(biases[metric] + [0]), max(biases[metric])) for metric in metrics}
 				for i, (metric, bar_color) in enumerate(colourise(metrics)):
-					max_bias = {metric: max(bias[model][strat][metric] for model in models) for metric in metrics}
-					with Scatter(f'Bias ({metric}) across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) as scatter, \
-						Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) as size:  # Params as circle sizes
-						#Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log', xlabel="# Parameters", ylabel="F1-score") as size:  # Params on x axis
+					with (Scatter(f'Bias ({metric}) across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) if f1 is not None else contextlib.ExitStack()) as scatter, \
+						(Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) if f1 is not None else contextlib.ExitStack()) as size:  # Params as circle sizes
+						#(Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log', xlabel="# Parameters", ylabel="F1-score") if f1 is not None else contextlib.ExitStack()) as size:  # Params on x axis
 						b_normalised_to_stdmad = {}
 						for j, ((model, sc_color), label, marker) in enumerate(zip(colourise(models), labels, MARKERS)):
 							b = bias[model][strat][metric]
-							b_normalised_to_01 = b / max_bias[metric]  # Normalise bias to 0-1 range (for marker size in scatter plot)
-							b_normalised_to_stdmad[model] = b_normalised_to_01 * max(max_bias['STD'], max_bias['MAD']) if metric not in ('STD', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
+							min_, max_ = bias_range[metric]
+							b_normalised_to_01 = (b - min_) / (max_ - min_)  # Normalise bias to 0-1 range (for marker size in scatter plot)
+							sm_min, sm_max = min(bias_range['STD'][0], bias_range['MAD'][0]), max(bias_range['STD'][1], bias_range['MAD'][1])
+							b_normalised_to_stdmad[model] = (b - min_) / (max_ - min_) * (sm_max - sm_min) + sm_min if metric not in ('STD', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
 							bar.plot(b_normalised_to_stdmad[model], j, i, label=metric, color=bar_color)
-							scatter.plot(f1[model], b, label=label, color=sc_color, marker=marker)
-							#size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=label, color=sc_color, marker=marker)
-							size.plot(f1[model], b, .01 * math.sqrt(model_complexity[model.lower()][0]), label=label, color=sc_color, marker=marker)
-						bar.horizontal_line(np.mean(list(b_normalised_to_stdmad.values())), linestyle='--', color=bar_color)
+							if f1 is not None:
+								scatter.plot(f1[model], b, label=label, color=sc_color, marker=marker)
+								#size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=label, color=sc_color, marker=marker)
+								size.plot(f1[model], b, .01 * math.sqrt(model_complexity[model.lower()][0]), label=label, color=sc_color, marker=marker)
+						if plot_means:
+							bar.horizontal_line(np.mean(list(b_normalised_to_stdmad.values())), linestyle='--', linewidth=2, color=bar_color)
 			with Heatmap(fig_suffix, self.fig_dir, metrics) as hmap:
 				self._bias_matrices[strat].append(np.array([[bias[model][strat][metric] for model in models] for metric in metrics]))
 				hmap.plot(np.corrcoef(self._bias_matrices[strat][-1]))
@@ -706,7 +722,9 @@ class Bar(Figure):
 		ymin = self.min if self.min != float('inf') else 0
 		ymax = self.max if self.max != float('-inf') else 1
 		ytick_size = self._nice_tick_size(ymin, ymax)
-		self.ax.set_ylim(max(0, ymin - ytick_size), ymax + ytick_size)
+		ymin = ymin - .5 * ytick_size if ymin < 0 or ymin - .5 * ytick_size >= 0 else 0
+		ymax += .5 * ytick_size
+		self.ax.set_ylim(ymin, ymax)
 		self.ax.yaxis.set_major_locator(MultipleLocator(ytick_size))
 		self.ax.yaxis.set_minor_locator(MultipleLocator(ytick_size / 2))
 		self.save()
