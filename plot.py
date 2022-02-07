@@ -176,9 +176,9 @@ class Main:
 
 		# Plot overall performances to bar plot and P/R curves
 		with Bar('Overall', self.fig_dir, self._sorted_models, len(tests)) as bar:
-			for i, (test, bar_colour) in enumerate(colourise(tests)):
+			for i, (test, bar_color) in enumerate(colourise(tests)):
 				with PR(test, self.fig_dir) as roc:
-					for j, (model, roc_colour) in enumerate(colourise(self._sorted_models)):
+					for j, (model, roc_color) in enumerate(colourise(self._sorted_models)):
 						mean_plot, lower_std, upper_std = self._results['mean_pr'][model]['All'][test]
 
 						# Compute k-fold std
@@ -187,21 +187,21 @@ class Main:
 						folds = np.array_split(results, self.k)
 						std = np.std(lmap(np.mean, folds))
 
-						bar.plot(results.mean(), j, i, std=std, label=test, colour=bar_colour)
-						#roc.plot(mean_plot, lower_std, upper_std, label=model, colour=roc_colour)
-						roc.plot(mean_plot, label=model, colour=roc_colour)
+						bar.plot(results.mean(), j, i, std=std, label=test, color=bar_color)
+						#roc.plot(mean_plot, lower_std, upper_std, label=model, color=roc_color)
+						roc.plot(mean_plot, label=model, color=roc_color)
 
 	def _experiment2(self, attrs):
 		attrs = ensure_iterable(attrs, True)
 		name = ", ".join(f"{attr.title()}s" for attr in attrs)
 		print(f"Experiment 2: Bias across different {name}", flush=True)
 		models = list(self._sorted_models)
-		if 'colour' in attrs:
-			models.append('RGB-SS-Eye-MS+ScleraU-Net2+FCN8')
-		if 'light' in attrs:
-			models.append('RGB-SS-Eye-MS+ScleraU-Net2+FCN8+ScleraSegNet')
-		if 'phone' in attrs:
-			models.append('RGB-SS-Eye-MS+ScleraU-Net2+ScleraSegNet')
+		# if 'colour' in attrs:
+		# 	models.append('RGB-SS-Eye-MS+ScleraU-Net2+FCN8')
+		# if 'light' in attrs:
+		# 	models.append('RGB-SS-Eye-MS+ScleraU-Net2+FCN8+ScleraSegNet')
+		# if 'phone' in attrs:
+		# 	models.append('RGB-SS-Eye-MS+ScleraU-Net2+ScleraSegNet')
 
 		bias = {}
 		f1 = {}
@@ -230,7 +230,7 @@ class Main:
 	def _experiment3(self):
 		print("Experiment 3: Bias across different evaluation datasets", flush=True)
 		trains = [train for train in TRAIN_TEST_DICT if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD so we can consistently compute bias on 3 evaluation datasets
-		models = self._sorted_models + ['RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN']
+		models = self._sorted_models# + ['RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN']
 
 		bias = treedict()
 		with (self.latex_dir/'Bias - Test data.txt').open('w', encoding='utf-8') as latex:
@@ -247,7 +247,7 @@ class Main:
 	def _experiment4(self):
 		print("Experiment 4: Bias across different training datasets", flush=True)
 		tests = [test for test in TEST_DATASETS if test != 'SMD']  # Skip SMD so we can consistently compute bias on 5 training configurations
-		models = self._sorted_models + ['ScleraU-Net2+FCN8+ScleraMaskRCNN']
+		models = self._sorted_models# + ['ScleraU-Net2+FCN8+ScleraMaskRCNN']
 
 		bias = treedict()
 		f1 = treedict()
@@ -305,10 +305,10 @@ class Main:
 				with \
 					ROC(f'{test} - {method}', self.fig_dir, xscale='log') as roc, \
 					Histogram(f'{test} - {method}', self.fig_dir, xscale='invlog') as hist:
-					for model, colour in colourise(models):
+					for model, color in colourise(models):
 						eval_, _ = saved_evals[method][model][test]
-						roc.plot(eval_.far, eval_.ver, label=model, colour=colour)
-						hist.plot(eval_.genuine, eval_.impostors, label=model, colour=colour)
+						roc.plot(eval_.far, eval_.ver, label=model, color=color)
+						hist.plot(eval_.genuine, eval_.impostors, label=model, color=color)
 
 	def _experiment6(self):
 		print("Experiment 6: Recognition on bias groups", flush=True)
@@ -354,10 +354,10 @@ class Main:
 					with \
 						ROC(f'{bias_type} - {test} - {method}', self.fig_dir, xscale='log') as roc, \
 						Histogram(f'{bias_type} - {test} - {method}', self.fig_dir, xscale='invlog') as hist:
-						for c, (cluster, colour) in enumerate(colourise(clusters), start=1):
+						for c, (cluster, color) in enumerate(colourise(clusters), start=1):
 							_, far, ver, genuine, impostors = saved_evals[method][cluster][test]
-							roc.plot(far, ver, label=f"Cluster {c}", colour=colour)
-							hist.plot(genuine, impostors, label=f"Cluster {c}", colour=colour)
+							roc.plot(far, ver, label=f"Cluster {c}", color=color)
+							hist.plot(genuine, impostors, label=f"Cluster {c}", color=color)
 
 	def _save_evals(self, mean_std, name):
 		save = self.eval_dir/f'{name}.txt'
@@ -399,10 +399,10 @@ class Main:
 		control_means = np.array(lmap(np.mean, control_groups))  # 1D array of per-control-group mean F1s
 
 		strat = bool(n_samples)  # Stratified?
-		bias[strat]['σ'] = group_means.std()  # Scalar σ of F1 means across groups
+		bias[strat]['STD'] = group_means.std()  # Scalar σ of F1 means across groups
 		bias[strat]['MAD'] = np.mean(np.abs(group_means - group_means.mean()))  # Scalar mean absolute deviation of F1 means across groups
-		bias[strat]['CR'] = bias[strat]['σ'] / control_means.std()  # Scalar ratio between σ of F1 means across groups and σ of F1 means across control groups
-		bias[strat]['IIR'] = bias[strat]['σ'] / group_stds.mean()  # Scalar ratio between σ of F1 means across groups and the mean σ of F1 within groups
+		bias[strat]['CGD'] = bias[strat]['STD'] / control_means.std()  # Scalar ratio between σ of F1 means across groups and σ of F1 means across control groups
+		bias[strat]['FSD'] = bias[strat]['STD'] / group_stds.mean()  # Scalar ratio between σ of F1 means across groups and the mean σ of F1 within groups
 
 		return bias
 
@@ -420,7 +420,7 @@ class Main:
 		if column2 == column2_values[0]:  # First line of model
 			latex.write(fr"\multirow{{{len(column2_values)}}}{{*}}{{{'Ensemble' if '+' in model else model}}}")
 		latex.write(f" & {column2 if column2 == column2_values[0] else column2.ljust(max(map(len, column2_values[1:])))}")
-		latex.write("".join(f" & ${fmt(bias[strat][metric])}$" for strat in (False, True) for metric in ('σ', 'MAD', 'CR', 'IIR')))
+		latex.write("".join(f" & ${fmt(bias[strat][metric])}$" for strat in (False, True) for metric in ('STD', 'MAD', 'CGD', 'FSD')))
 		latex.write(r" \\")
 		if column2 == column2_values[-1] and model != models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
@@ -433,19 +433,21 @@ class Main:
 			if strat:
 				fig_suffix += " (Stratified)"
 			with Bar(f'Bias across {fig_suffix}', self.fig_dir, labels, len(metrics), ylabel="Bias") as bar:
-				for i, (metric, bar_colour) in enumerate(colourise(metrics)):
+				for i, (metric, bar_color) in enumerate(colourise(metrics)):
 					max_bias = {metric: max(bias[model][strat][metric] for model in models) for metric in metrics}
 					with Scatter(f'Bias ({metric}) across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) as scatter, \
 						Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) as size:  # Params as circle sizes
 						#Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log', xlabel="# Parameters", ylabel="F1-score") as size:  # Params on x axis
-						for j, ((model, sc_colour), label, marker) in enumerate(zip(colourise(models), labels, MARKERS)):
+						b_normalised_to_stdmad = {}
+						for j, ((model, sc_color), label, marker) in enumerate(zip(colourise(models), labels, MARKERS)):
 							b = bias[model][strat][metric]
 							b_normalised_to_01 = b / max_bias[metric]  # Normalise bias to 0-1 range (for marker size in scatter plot)
-							b_normalised_to_stdmad = b_normalised_to_01 * max(max_bias['σ'], max_bias['MAD']) if metric not in ('σ', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
-							bar.plot(b_normalised_to_stdmad, j, i, label=metric, colour=bar_colour)
-							scatter.plot(f1[model], b, label=label, colour=sc_colour, marker=marker)
-							#size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=label, colour=sc_colour, marker=marker)
-							size.plot(f1[model], b, .01 * math.sqrt(model_complexity[model.lower()][0]), label=label, colour=sc_colour, marker=marker)
+							b_normalised_to_stdmad[model] = b_normalised_to_01 * max(max_bias['STD'], max_bias['MAD']) if metric not in ('STD', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
+							bar.plot(b_normalised_to_stdmad[model], j, i, label=metric, color=bar_color)
+							scatter.plot(f1[model], b, label=label, color=sc_color, marker=marker)
+							#size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=label, color=sc_color, marker=marker)
+							size.plot(f1[model], b, .01 * math.sqrt(model_complexity[model.lower()][0]), label=label, color=sc_color, marker=marker)
+						bar.horizontal_line(np.mean(list(b_normalised_to_stdmad.values())), linestyle='--', color=bar_color)
 			with Heatmap(fig_suffix, self.fig_dir, metrics) as hmap:
 				self._bias_matrices[strat].append(np.array([[bias[model][strat][metric] for model in models] for metric in metrics]))
 				hmap.plot(np.corrcoef(self._bias_matrices[strat][-1]))
@@ -570,6 +572,12 @@ class Figure(ABC):
 			key=lambda tick_size: (max(0, min_ticks - diff // tick_size - 1, diff // tick_size + 1 - max_ticks), diff // tick_size + 1)
 		)
 
+	def horizontal_line(self, *args, **kw):
+		return self.ax.axhline(*args, **kw)
+
+	def vertical_line(self, *args, **kw):
+		return self.ax.axvline(*args, **kw)
+
 
 class PR(Figure):
 	def __init__(self, name, save_dir, **kw):
@@ -644,18 +652,18 @@ class PR(Figure):
 
 		plt.close(self.cmb_fig)
 
-	def plot(self, mean_plot, lower_std=None, upper_std=None, *, label=None, colour=None, bin_only=False):
+	def plot(self, mean_plot, lower_std=None, upper_std=None, *, label=None, color=None, bin_only=False):
 		super().plot()
 		for ax in self.axes:
 			if not bin_only:
-				ax.plot(mean_plot.recall, mean_plot.precision, label=label, linewidth=2, color=colour)
+				ax.plot(mean_plot.recall, mean_plot.precision, label=label, linewidth=2, color=color)
 				for std in lower_std, upper_std:
 					if std is not None:
-						ax.plot(std.recall, std.precision, ':', linewidth=1, color=colour)
-				ax.plot(*mean_plot.f1_point, 'o', markersize=12, color=colour)
-				ax.plot(*mean_plot.bin_point, 'o', markersize=12, color=colour, markerfacecolor='none')
+						ax.plot(std.recall, std.precision, ':', linewidth=1, color=color)
+				ax.plot(*mean_plot.f1_point, 'o', markersize=12, color=color)
+				ax.plot(*mean_plot.bin_point, 'o', markersize=12, color=color, markerfacecolor='none')
 			else:
-				ax.plot(*mean_plot.bin_point, 'o', label=label, markersize=12, color=colour, markerfacecolor='none')
+				ax.plot(*mean_plot.bin_point, 'o', label=label, markersize=12, color=color, markerfacecolor='none')
 
 class Bar(Figure):
 	def __init__(self, name, save_dir, groups, n=1, *, ylabel="F1-score", fontsize=30, margin=.2):
@@ -705,7 +713,7 @@ class Bar(Figure):
 		self.ax.tick_params(axis='x', bottom=False, labelbottom=False)
 		#self.save(f'{self.name} (No Labels)')
 
-	def plot(self, val, group=0, index=0, *, std=None, label=None, colour=None):
+	def plot(self, val, group=0, index=0, *, std=None, label=None, color=None):
 		super().plot()
 		plt.rcParams['font.size'] = 10
 		err_w = np.clip(self.width * 10, 2, 5)
@@ -717,7 +725,7 @@ class Bar(Figure):
 			width=self.width,
 			align='edge',
 			label=label,
-			color=colour
+			color=color
 		)
 		self.min = min(self.min, val - std if std else val)
 		self.max = max(self.max, val + std if std else val)
@@ -766,12 +774,12 @@ class Scatter(Figure):
 			self.ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
 		self.save()
 
-	def plot(self, x, y, size=None, *, label=None, colour=None, marker=None):
+	def plot(self, x, y, size=None, *, label=None, color=None, marker=None):
 		super().plot()
 		markersize = 8
 		if size:
-			self.ax.plot(x, y, 'o', markersize=size, color=(*colour[:3], .2))
-		self.ax.plot(x, y, marker, markersize=markersize, label=label, color=colour)
+			self.ax.plot(x, y, 'o', markersize=size, color=(*color[:3], .2))
+		self.ax.plot(x, y, marker, markersize=markersize, label=label, color=color)
 
 		self.xmin = min(self.xmin, x)
 		self.xmax = max(self.xmax, x)
@@ -818,9 +826,9 @@ class ROC(Figure):
 			self.ax.legend(bbox_to_anchor=(1.02, .5), ncol=ncol, loc='center left', borderaxespad=0)
 			self.save()
 
-	def plot(self, x, y, *, label=None, colour=None):
+	def plot(self, x, y, *, label=None, color=None):
 		super().plot()
-		self.ax.plot(x, y, label=label, linewidth=2, color=colour)
+		self.ax.plot(x, y, label=label, linewidth=2, color=color)
 
 
 class CMC(Figure):
@@ -854,9 +862,9 @@ class CMC(Figure):
 			self.ax.legend(bbox_to_anchor=(1.02, .5), ncol=ncol, loc='center left', borderaxespad=0)
 			self.save()
 
-	def plot(self, cmc, *, label=None, colour=None):
+	def plot(self, cmc, *, label=None, color=None):
 		super().plot()
-		self.ax.plot(np.arange(len(cmc)), cmc, label=label, linewidth=2, color=colour)
+		self.ax.plot(np.arange(len(cmc)), cmc, label=label, linewidth=2, color=color)
 
 
 class Histogram(Figure):
@@ -900,12 +908,12 @@ class Histogram(Figure):
 		self.ax.legend(bbox_to_anchor=(.5, 1.02), ncol=2, loc='lower center', borderaxespad=0)
 		self.save()
 
-	def plot(self, genuine, impostors, *, label=None, colour=None, n_points=100):
+	def plot(self, genuine, impostors, *, label=None, color=None, n_points=100):
 		super().plot()
 		for dist, l, ls in ((genuine, label, '-'), (impostors, None, '--')):
 			y, x = np.histogram(dist, n_points)
 			x = .5 * (x[:-1] + x[1:])
-			self.ax.plot(x, y, label=l, linewidth=1, linestyle=ls, color=colour)
+			self.ax.plot(x, y, label=l, linewidth=1, linestyle=ls, color=color)
 
 
 class Heatmap(Figure):
