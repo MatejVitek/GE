@@ -6,9 +6,9 @@ import sys
 from pathlib import Path
 from ast import literal_eval
 from joblib import delayed, Parallel
-from matplotlib.lines import Line2D
 from matej import make_module_callable
 from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lmap, shuffled, treedict
+from matej.colour import text_colour
 from matej.parallel import tqdm_joblib
 import argparse
 from tkinter import *
@@ -25,12 +25,15 @@ from evaluation.recognition import *
 import itertools as it
 import logging
 import math
+from matplotlib.lines import Line2D
+from matplotlib.patches import Ellipse
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
 import numpy as np
 import operator as op
 import pickle
+import scipy as sp
 from statistics import harmonic_mean
 
 
@@ -62,7 +65,7 @@ TRAIN_TEST_DICT = {train: [test for test in TEST_DATASETS if test not in train a
 TRAIN_TEST = [(train, test) for train, tests in TRAIN_TEST_DICT.items() for test in tests]  # List of all valid train-test configurations
 FIG_EXTS = ensure_iterable(FIG_EXTS, True)
 colourise = lambda x: zip(x, CMAP(np.linspace(0, 1, len(x))))
-fmt = lambda x: np.format_float_positional(x, precision=3, unique=False)
+fmt = lambda x: np.format_float_positional(x, precision=3, unique=False, fractional=False, trim='k')
 oom = lambda x: 10 ** math.floor(math.log10(x))  # Order of magnitude: oom(0.9) = 0.1, oom(30) = 10
 logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'PostScript backend' not in record.getMessage())  # Suppress matplotlib warnings about .eps transparency
 
@@ -123,12 +126,12 @@ class Main:
 							for collection in ('seg', 'pr', 'mean_pr'):
 								self._results[collection][model][train][test] = pickle.load(f)
 					except IOError:
-						print(f"Missing segmentation results for {model} ({train} - {test})")
+						print(f"Missing segmentation results for {model} ({train} - {test})", flush=True)
 					try:
 						with (model_dir/f'Pickles/Recognition/{train}_{test}.pkl').open('rb') as f:
 							self._results['dist'][model][train][test] = pickle.load(f)
 					except IOError:
-						print(f"Missing recognition results for {model} ({train} - {test})")
+						print(f"Missing recognition results for {model} ({train} - {test})", flush=True)
 
 				# Compute harmonic means
 				try:
@@ -136,9 +139,9 @@ class Main:
 						for metric in next(iter(self._results['seg'][model][train].values()))[pb]:
 							self._results['hmean'][model][train][pb][metric] = harmonic_mean([self._results['seg'][model][train][t][pb][metric].mean() for t in tests])
 				except (StopIteration, AttributeError):
-					print("Cannot compute harmonic mean for non-existent segmentation results")
+					print("Cannot compute harmonic mean for non-existent segmentation results", flush=True)
 
-		print("Sorting models by the harmonic mean of their binary F1-Scores on the evaluation datasets")
+		print("Sorting models by the harmonic mean of their binary F1-Scores on the evaluation datasets", flush=True)
 		self._sorted_models = sorted(
 			filter(lambda model: '+' not in model, self._results['seg']),
 			key=lambda model: self._results['hmean'][model]['All'][1]['F1-score'],
@@ -164,18 +167,20 @@ class Main:
 
 	def _experiment1(self):
 		print("Experiment 1: Overall performance", flush=True)
-		tests = TRAIN_TEST_DICT['All']
 
 		# Save and latexify overall performances
 		with (self.latex_dir/'Performance.txt').open('w', encoding='utf-8') as latex:
 			for model in self._sorted_models:
-				for test in tests:
-					r = self._results['seg'][model]['All'][test]
-					mean_std = [{metric: (r[pb][metric].mean(), r[pb][metric].std()) for metric in r[pb]} for pb in range(2)]
-					self._save_evals(mean_std, f'{model} - All - {test}')
-					self._latexify_evals(mean_std, self._results['hmean'][model]['All'], latex, model, test, tests)
+				for train, tests in TRAIN_TEST_DICT.items():
+					for test in tests:
+						r = self._results['seg'][model][train][test]
+						mean_std = [{metric: (r[pb][metric].mean(), r[pb][metric].std()) for metric in r[pb]} for pb in range(2)]
+						self._save_evals(mean_std, f'{model} - {train} - {test}')
+						if train == 'All':
+							self._latexify_evals(mean_std, self._results['hmean'][model]['All'], latex, model, test, tests)
 
 		# Plot overall performances to bar plot and P/R curves
+		tests = TRAIN_TEST_DICT['All']
 		with Bar('Overall', self.fig_dir, self._sorted_models, len(tests)) as bar:
 			for i, (test, bar_color) in enumerate(colourise(tests)):
 				with PR(test, self.fig_dir) as roc:
@@ -196,6 +201,9 @@ class Main:
 		attrs = ensure_iterable(attrs, True)
 		name = ", ".join(f"{attr.title()}s" for attr in attrs)
 		print(f"Experiment 2: Bias across different {name}", flush=True)
+		samples = self._samples['MOBIUS']
+		possible_values = list(dict_product({attr: {getattr(sample, attr) for sample in samples} for attr in attrs}))
+
 		models = list(self._sorted_models)
 		# if 'colour' in attrs:
 		# 	models.append('RGB-SS-Eye-MS+ScleraU-Net2+FCN8')
@@ -204,29 +212,47 @@ class Main:
 		# if 'phone' in attrs:
 		# 	models.append('RGB-SS-Eye-MS+ScleraU-Net2+ScleraSegNet')
 
-		bias = {}
+		save_f = self.pkl_dir/f'Bias - {name}.pkl'
+		if save_f.is_file():
+			print(f"Bias precomputed, loading from {save_f}", flush=True)
+			with save_f.open('rb') as f:
+				bias = pickle.load(f)
+		else:
+			print("Computing bias", flush=True)
+			bias = treedict()
 		f1 = {}
-		with (self.latex_dir/f'Bias - {name}.txt').open('w', encoding='utf-8') as latex:
+
+		with (self.latex_dir/f'Bias - {name}.txt').open('w', encoding='utf-8') as bias_latex, \
+			(self.latex_dir/f'Performance - {name}.txt').open('w', encoding='utf-8') as f1_latex:
+			f1_latex.write(" & & ")
+			titled_values = [", ".join(v.title() for v in current_values.values()) for current_values in possible_values]
+			f1_latex.write(" & ".join(fr"\textbf{{{v}}}" for v in titled_values))
+			f1_latex.write(r" \\\midrule")
+			f1_latex.write("\n")
+
 			for model in models:
 				for train in TRAIN_TEST_DICT:
-					samples = self._samples['MOBIUS']
 					f1scores = self._results['seg'][model][train]['MOBIUS'][1]['F1-score']
-					possible_values = {attr: {getattr(sample, attr) for sample in samples} for attr in attrs}
-					groups = [  # List of 1D arrays. Each 1D array contains per-image F1s for a specific attribute value combination (such as light=natural, phone=iPhone)
-						f1scores[[i for i, sample in enumerate(samples) if all(getattr(sample, attr) == current_values[attr] for attr in attrs)]]
-						for current_values in dict_product(possible_values)
-					]
+					if train not in bias or model not in bias[train]:
+						groups = [  # List of 1D arrays. Each 1D array contains per-image F1s for a specific attribute value combination (such as light=natural, phone=iPhone)
+							f1scores[[i for i, sample in enumerate(samples) if all(getattr(sample, attr) == current_values[attr] for attr in attrs)]]
+							for current_values in possible_values
+						]
+						bias[train][model] = self._compute_biases(groups)
 
-					b = self._compute_biases(groups)
-					self._save_biases(b, f'{model} - {train} - {name}')
-					self._latexify_biases(b, latex, model, models, train, list(TRAIN_TEST_DICT))
+					self._save_biases(bias[train][model], f'{model} - {train} - {name}')
+					self._latexify_biases(bias[train][model], bias_latex, model, models, train, list(TRAIN_TEST_DICT))
 
-					# Save results from train config 'All' for later plotting
+					# Save results from train config 'All' for later plotting and latexify the mean per-group scores
 					if train == 'All':
-						bias[model] = b
 						f1[model] = f1scores.mean()
+						self._latexify_grouped_evals(lmap(np.mean, groups), f1[model], f1_latex, model, models)
 
-		self._plot_biases(bias, f1, models, name)
+		self._plot_biases(bias['All'], f1, models, name)
+
+		print(f"Saving bias to {save_f}", flush=True)
+		with save_f.open('wb') as f:
+			pickle.dump(bias, f)
 
 	def _experiment3(self):
 		#print("Experiment 3: Bias across different evaluation datasets", flush=True)
@@ -235,17 +261,28 @@ class Main:
 		sorted_trains = sorted(trains, key=lambda train: train.count('+'))
 		models = self._sorted_models# + ['RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN']
 
-		bias = treedict()
+		save_f = self.pkl_dir/f'Bias - Ethnicities.pkl'
+		if save_f.is_file():
+			print(f"Bias precomputed, loading from {save_f}", flush=True)
+			with save_f.open('rb') as f:
+				bias = pickle.load(f)
+		else:
+			print("Computing bias", flush=True)
+			bias = treedict()
 		bias_delta = treedict()
-		with (self.latex_dir/'Bias - Test data.txt').open('w', encoding='utf-8') as latex:
+
+		#with (self.latex_dir/'Bias - Test data.txt').open('w', encoding='utf-8') as latex:
+		with (self.latex_dir/'Bias - Ethnicities.txt').open('w', encoding='utf-8') as latex:
 			for model in models:
 				for train in trains:
-					#groups = [self._results['seg'][model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
-					groups = [
-						self._results['seg'][model][train]['MOBIUS'][1]['F1-score'],
-						np.hstack((self._results['seg'][model][train]['SMD'][1]['F1-score'], self._results['seg'][model][train]['SLD'][1]['F1-score']))
-					]
-					bias[train][model] = self._compute_biases(groups)
+					if train not in bias or model not in bias[train]:
+						#groups = [self._results['seg'][model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
+						groups = [
+							self._results['seg'][model][train]['MOBIUS'][1]['F1-score'],
+							np.hstack((self._results['seg'][model][train]['SMD'][1]['F1-score'], self._results['seg'][model][train]['SLD'][1]['F1-score']))
+						]
+						bias[train][model] = self._compute_biases(groups)
+
 					self._save_biases(bias[train][model], f'{model} - {train}')
 					self._latexify_biases(bias[train][model], latex, model, models, train, trains)
 				for strat in range(2):
@@ -257,24 +294,42 @@ class Main:
 			self._plot_biases(bias[train], {model: self._results['hmean'][model][train][1]['F1-score'] for model in self._results['hmean']}, models, f"ethnicities ({train})")
 		self._plot_biases(bias_delta, None, models, "ethnicities", plot_means=False)
 
+		print(f"Saving bias to {save_f}", flush=True)
+		with save_f.open('wb') as f:
+			pickle.dump(bias, f)
+
 	def _experiment4(self):
 		print("Experiment 4: Bias across different training datasets", flush=True)
 		tests = [test for test in TEST_DATASETS if test != 'SMD']  # Skip SMD so we can consistently compute bias on 5 training configurations
 		models = self._sorted_models# + ['ScleraU-Net2+FCN8+ScleraMaskRCNN']
 
-		bias = treedict()
+		save_f = self.pkl_dir/f'Bias - Train data.pkl'
+		if save_f.is_file():
+			print(f"Bias precomputed, loading from {save_f}", flush=True)
+			with save_f.open('rb') as f:
+				bias = pickle.load(f)
+		else:
+			print("Computing bias", flush=True)
+			bias = treedict()
 		f1 = treedict()
+
 		with (self.eval_dir/'LaTeX - Bias - Train data.txt').open('w', encoding='utf-8') as latex:
 			for model in models:
 				for test in tests:
 					groups = [self._results['seg'][model][train][test][1]['F1-score'] for train in TRAIN_TEST_DICT]
-					bias[test][model] = self._compute_biases(groups)
+					if test not in bias or model not in bias[test]:
+						bias[test][model] = self._compute_biases(groups)
 					f1[test][model] = harmonic_mean(lmap(np.mean, groups))
+
 					self._save_biases(bias[test][model], f'{model} - {test}')
 					self._latexify_biases(bias[test][model], latex, model, models, test, test)
 
 		for test in tests:
 			self._plot_biases(bias[test], f1[test], models, f"train data ({test})")
+
+		print(f"Saving bias to {save_f}", flush=True)
+		with save_f.open('wb') as f:
+			pickle.dump(bias, f)
 
 	def _experiment5(self):
 		print("Experiment 5: Recognition", flush=True)
@@ -294,11 +349,11 @@ class Main:
 							for dist_matrix in results.values()
 						)
 					save_f.parent.mkdir(parents=True, exist_ok=True)
-					print(f"Saving evals to {save_f}")
+					print(f"Saving evals to {save_f}", flush=True)
 					with save_f.open('wb') as f:
 						pickle.dump(evals, f)
 				else:
-					print(f"Loading evals from {save_f}")
+					print(f"Loading evals from {save_f}", flush=True)
 					with save_f.open('rb') as f:
 						evals = pickle.load(f)
 
@@ -374,7 +429,7 @@ class Main:
 
 	def _save_evals(self, mean_std, name):
 		save = self.eval_dir/f'{name}.txt'
-		print(f"Saving to {save}")
+		print(f"Saving to {save}", flush=True)
 		with save.open('w', encoding='utf-8') as f:
 			for pb, pb_text in enumerate(("Probabilistic", "Binarised")):
 				print(pb_text, file=f)
@@ -397,6 +452,7 @@ class Main:
 		latex.write("\n")
 
 	def _compute_biases(self, subject_groups):
+		#TODO: Save and load biases to keep results consistent
 		# Both stratified (with size of smallest group rounded down to nearest 100) and non-stratified experiments will be run
 		n_samples = 100 * int(min(len(group) for group in subject_groups) / 100)
 		if n_samples == 0:
@@ -418,7 +474,7 @@ class Main:
 
 	def _save_biases(self, bias, name):
 		save = self.eval_dir/f'Bias - {name}.txt'
-		print(f"Saving to {save}")
+		print(f"Saving to {save}", flush=True)
 		with save.open('w', encoding='utf-8') as f:
 			for s, strat in enumerate(("Total", "Stratified")):
 				print(strat, file=f)
@@ -436,7 +492,14 @@ class Main:
 			latex.write(r"\hline")
 		latex.write("\n")
 
-	def _plot_biases(self, bias, f1, models, fig_suffix, plot_means=True):
+	def _latexify_grouped_evals(self, group_f1s, total_f1, latex, model, models):
+		latex.write(("Ensemble" if "+" in model else model).ljust(max(map(len, models))))
+		latex.write(f" & {fmt(total_f1)} & ")
+		latex.write(" & ".join(f"{fmt(f1)} ({fmt(total_f1 - f1)})" for f1 in group_f1s))
+		latex.write(r" \\")
+		latex.write("\n")
+
+	def _plot_biases(self, bias, f1, models, fig_suffix, plot_means=True, plot_best_fit_line=True):
 		metrics = list(next(iter(bias.values()))[0])
 		labels = ["Ensemble" if '+' in model else model for model in models]
 		for strat in range(2):
@@ -446,24 +509,36 @@ class Main:
 			with Bar(f'{prefix} across {fig_suffix}', self.fig_dir, labels, len(metrics), ylabel=prefix) as bar:
 				biases = {metric: [bias[model][strat][metric] for model in models] for metric in metrics}
 				bias_range = {metric: (min(biases[metric] + [0]), max(biases[metric])) for metric in metrics}
+
 				for i, (metric, bar_color) in enumerate(colourise(metrics)):
 					with (Scatter(f'Bias ({metric}) across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) if f1 is not None else contextlib.ExitStack()) as scatter, \
 						(Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) if f1 is not None else contextlib.ExitStack()) as size:  # Params as circle sizes
 						#(Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log', xlabel="# Parameters", ylabel="F1-score") if f1 is not None else contextlib.ExitStack()) as size:  # Params on x axis
-						b_normalised_to_stdmad = {}
+						b_normalised_to_stdmad = []
+						sm_min, sm_max = np.mean((bias_range['STD'][0], bias_range['MAD'][0])), np.mean((bias_range['STD'][1], bias_range['MAD'][1]))
 						for j, ((model, sc_color), label, marker) in enumerate(zip(colourise(models), labels, MARKERS)):
 							b = bias[model][strat][metric]
 							min_, max_ = bias_range[metric]
-							b_normalised_to_01 = (b - min_) / (max_ - min_)  # Normalise bias to 0-1 range (for marker size in scatter plot)
-							sm_min, sm_max = min(bias_range['STD'][0], bias_range['MAD'][0]), max(bias_range['STD'][1], bias_range['MAD'][1])
-							b_normalised_to_stdmad[model] = (b - min_) / (max_ - min_) * (sm_max - sm_min) + sm_min if metric not in ('STD', 'MAD') else b  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
-							bar.plot(b_normalised_to_stdmad[model], j, i, label=metric, color=bar_color)
+							#b_normalised_to_01 = (b - min_) / (max_ - min_)  # Normalise bias to 0-1 range (for marker size in scatter plot)
+							b_normalised_to_stdmad.append((b - min_) / (max_ - min_) * (sm_max - sm_min) + sm_min if metric not in ('STD', 'MAD') else b)  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
+							bar.plot(b_normalised_to_stdmad[-1], j, i, label=metric, color=bar_color)
 							if f1 is not None:
 								scatter.plot(f1[model], b, label=label, color=sc_color, marker=marker)
 								#size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=label, color=sc_color, marker=marker)
 								size.plot(f1[model], b, .01 * math.sqrt(model_complexity[model.lower()][0]), label=label, color=sc_color, marker=marker)
 						if plot_means:
-							bar.horizontal_line(np.mean(list(b_normalised_to_stdmad.values())), linestyle='--', linewidth=2, color=bar_color)
+							bar.horizontal_line(np.mean(b_normalised_to_stdmad), linestyle='--', linewidth=3, color=bar_color)
+						if plot_best_fit_line and f1 is not None:
+							k, n, r, _, _ = sp.stats.linregress([f1[model] for model in models], [bias[model][strat][metric] for model in models])
+							scatter.line(k, n, label=f'$R^2={fmt(r**2)}$')
+							size.line(k, n, label=f'$R^2={fmt(r**2)}$')
+			
+			bump_metrics = 'CGD', 'FSD'
+			with Bump(fig_suffix, self.fig_dir, bump_metrics) as bump:
+				ranking = [sorted(models, key=lambda model: bias[model][strat][metric]) for metric in bump_metrics]
+				for i, ((model, bump_color), label) in enumerate(zip(colourise(models), labels)):
+					bump.plot([r.index(model) for r in ranking], scores=[bias[model][strat][metric] for metric in bump_metrics], label=label, color=bump_color)
+
 			with Heatmap(fig_suffix, self.fig_dir, metrics) as hmap:
 				self._bias_matrices[strat].append(np.array([[bias[model][strat][metric] for model in models] for metric in metrics]))
 				hmap.plot(np.corrcoef(self._bias_matrices[strat][-1]))
@@ -498,7 +573,7 @@ class Main:
 
 	def _save_rec(self, ver_eval, name):
 		save = self.eval_dir/f'{name}.txt'
-		print(f"Saving to {save}")
+		print(f"Saving to {save}", flush=True)
 		with save.open('w', encoding='utf-8') as f:
 			print(ver_eval, file=f)
 
@@ -544,7 +619,7 @@ class Main:
 class Figure(ABC):
 	def __init__(self, name, save_dir, *, fontsize=24):
 		self.name = name
-		self.dir = save_dir
+		self.dir = save_dir/type(self).__name__
 		self.fontsize = fontsize
 		self.fig = None
 		self.ax = None
@@ -576,7 +651,7 @@ class Figure(ABC):
 		self.dir.mkdir(parents=True, exist_ok=True)
 		for ext in FIG_EXTS:
 			save = self.dir/f'{name}.{ext}'
-			print(f"Saving to {save}")
+			print(f"Saving to {save}", flush=True)
 			fig.savefig(save, bbox_inches='tight')
 
 	@staticmethod
@@ -594,10 +669,24 @@ class Figure(ABC):
 	def vertical_line(self, *args, **kw):
 		return self.ax.axvline(*args, **kw)
 
+	def line(self, k, n, *, label=None, **kw):
+		line = self.ax.axline((0, n), slope=k, **kw)
+		xy = line.get_xydata()
+		self.ax.annotate(
+			label,
+			(xy[0] + xy[-1]) // 2,
+			xycoords='axes fraction',
+			fontsize=int(.5 * self.fontsize),
+			ha='center', va='center_baseline',
+			rotation=k, rotation_mode='anchor',
+			**kw
+		)
+		return line
+
 
 class PR(Figure):
-	def __init__(self, name, save_dir, **kw):
-		super().__init__(name, save_dir/'PR', **kw)
+	def __init__(self, *args, **kw):
+		super().__init__(*args, **kw)
 		self.cmb_fig = None
 		self.cmb_ax = None
 		self.zoom_ax = None
@@ -672,7 +761,7 @@ class PR(Figure):
 		super().plot()
 		for ax in self.axes:
 			if not bin_only:
-				ax.plot(mean_plot.recall, mean_plot.precision, label=label, linewidth=2, color=color)
+				ax.plot(mean_plot.recall, mean_plot.precision, label=label, linewidth=3, color=color)
 				for std in lower_std, upper_std:
 					if std is not None:
 						ax.plot(std.recall, std.precision, ':', linewidth=1, color=color)
@@ -683,7 +772,7 @@ class PR(Figure):
 
 class Bar(Figure):
 	def __init__(self, name, save_dir, groups, n=1, *, ylabel="F1-score", fontsize=30, margin=.2):
-		super().__init__(name, save_dir/'Bar', fontsize=fontsize)
+		super().__init__(name, save_dir, fontsize=fontsize)
 		self.groups = groups
 		self.m = len(groups)
 		self.n = n
@@ -751,7 +840,7 @@ class Bar(Figure):
 
 class Scatter(Figure):
 	def __init__(self, name, save_dir, *, xlabel="F1-score", ylabel="Bias", xscale='linear', fontsize=28):
-		super().__init__(name, save_dir/'Scatter', fontsize=fontsize)
+		super().__init__(name, save_dir, fontsize=fontsize)
 		self.xscale = xscale
 		self.xmin = self.xmax = self.ymin = self.ymax = None
 		self.xlabel = xlabel
@@ -807,7 +896,7 @@ class Scatter(Figure):
 
 class ROC(Figure):
 	def __init__(self, name, save_dir, *, xlabel="FAR", ylabel="Verification", xscale='linear', fontsize=20):
-		super().__init__(name, save_dir/'ROC', fontsize=fontsize)
+		super().__init__(name, save_dir, fontsize=fontsize)
 		self.xlabel = xlabel
 		self.ylabel = ylabel
 		self.xscale = xscale
@@ -846,12 +935,12 @@ class ROC(Figure):
 
 	def plot(self, x, y, *, label=None, color=None):
 		super().plot()
-		self.ax.plot(x, y, label=label, linewidth=2, color=color)
+		self.ax.plot(x, y, label=label, linewidth=3, color=color)
 
 
 class CMC(Figure):
 	def __init__(self, name, save_dir, *, fontsize=20):
-		super().__init__(name, save_dir/'CMC', fontsize=fontsize)
+		super().__init__(name, save_dir, fontsize=fontsize)
 
 	def __enter__(self):
 		super().__enter__()
@@ -882,12 +971,12 @@ class CMC(Figure):
 
 	def plot(self, cmc, *, label=None, color=None):
 		super().plot()
-		self.ax.plot(np.arange(len(cmc)), cmc, label=label, linewidth=2, color=color)
+		self.ax.plot(np.arange(len(cmc)), cmc, label=label, linewidth=3, color=color)
 
 
 class Histogram(Figure):
 	def __init__(self, name, save_dir, *, xlabel="Distance", ylabel="Frequency", xscale='linear', fontsize=20):
-		super().__init__(name, save_dir/'Histogram', fontsize=fontsize)
+		super().__init__(name, save_dir, fontsize=fontsize)
 		self.xlabel = xlabel
 		self.ylabel = ylabel
 		self.xscale = xscale
@@ -936,7 +1025,7 @@ class Histogram(Figure):
 
 class Heatmap(Figure):
 	def __init__(self, name, save_dir, labels, *args, **kw):
-		super().__init__(name, save_dir/'Heatmap', *args, **kw)
+		super().__init__(name, save_dir, *args, **kw)
 		self.labels = labels
 
 	def __enter__(self):
@@ -956,6 +1045,62 @@ class Heatmap(Figure):
 		super().plot()
 		p = self.ax.matshow(matrix, vmin=-1, vmax=1, cmap='bwr')
 		self.fig.colorbar(p)
+
+
+class Bump(Figure):
+	def __init__(self, name, save_dir, xticks, *, fontsize=30):
+		super().__init__(name, save_dir, fontsize=fontsize)
+		self.xticks = xticks
+		self.rax = None
+		self.llabels = None
+		self.rlabels = None
+
+	def __enter__(self):
+		super().__enter__()
+		self.rax = self.ax.secondary_yaxis('right')
+		self.llabels = {}
+		self.rlabels = {}
+		self.ax.tick_params(left=False, bottom=False)
+		self.rax.tick_params(right=False)
+		self.ax.margins(0)
+		self.fig.tight_layout(pad=0)
+		return self
+
+	def close(self, *args, **kw):
+		self.ax.set_xticks(np.arange(len(self.xticks)))
+		self.ax.set_xticklabels(self.xticks)
+		ylen = len(self.llabels)
+		self.ax.set_yticks(np.arange(ylen))
+		self.ax.set_yticklabels([self.llabels[i] for i in range(ylen)])
+		self.rax.set_yticks(np.arange(ylen))
+		self.rax.set_yticklabels([self.rlabels[i] for i in range(ylen)])
+		self.ax.set_xlim(-.2, len(self.xticks) - .8)
+		self.ax.set_ylim(-.5, ylen - .5)
+		self.ax.invert_yaxis()
+		self.ax.set_frame_on(False)
+		self.rax.set_frame_on(False)
+		self.save()
+
+	def plot(self, y, *, scores=None, label=None, color=None):
+		super().plot()
+		self.ax.plot(np.arange(len(y)), y, linewidth=3, color=color)
+		if scores:
+			for i, score in enumerate(scores):
+				self.ax.add_artist(Ellipse(
+					(i, y[i]),
+					.35, .9,
+					color=color
+				))
+				self.ax.annotate(
+					fmt(score),
+					(i, y[i]),
+					ha='center', va='center',
+					fontsize=int(.8 * self.fontsize),
+					color=text_colour(color),
+					weight='heavy'
+				)
+		self.llabels[y[0]] = label
+		self.rlabels[y[-1]] = label
 
 
 class GUI(Tk):
