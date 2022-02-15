@@ -7,7 +7,7 @@ from pathlib import Path
 from ast import literal_eval
 from joblib import delayed, Parallel
 from matej import make_module_callable
-from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lmap, shuffled, treedict
+from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lfilter, lmap, shuffled, treedict
 from matej.colour import text_colour
 from matej.parallel import tqdm_joblib
 import argparse
@@ -34,7 +34,7 @@ from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
 import numpy as np
 import operator as op
 import pickle
-import scipy as sp
+import scipy.stats as sps
 from statistics import harmonic_mean
 
 
@@ -514,6 +514,11 @@ class Main:
 	def _plot_biases(self, bias, f1, models, fig_suffix, plot_means=True, plot_best_fit_line=True):
 		metrics = list(next(iter(bias.values()))[0])
 		labels = ["Ensemble" if '+' in model else model for model in models]
+		if f1 is not None:
+			zscore = np.abs(sps.zscore([f1[model] for model in models]))
+			outliers = {models[i] for i, z in enumerate(zscore) if z > 2}
+			if outliers:
+				print("Outliers: ", outliers, flush=True)
 		for strat in range(2):
 			if strat:
 				fig_suffix += " (Stratified)"
@@ -534,17 +539,18 @@ class Main:
 							#b_normalised_to_01 = (b - min_) / (max_ - min_)  # Normalise bias to 0-1 range (for marker size in scatter plot)
 							b_normalised_to_stdmad.append((b - min_) / (max_ - min_) * (sm_max - sm_min) + sm_min if metric not in ('STD', 'MAD') else b)  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
 							bar.plot(b_normalised_to_stdmad[-1], j, i, label=metric, color=bar_color)
-							if f1 is not None:
+							if f1 is not None and model not in outliers:
 								scatter.plot(f1[model], b, label=label, color=sc_color, marker=marker)
 								#size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=label, color=sc_color, marker=marker)
 								size.plot(f1[model], b, .01 * math.sqrt(model_complexity[model.lower()][0]), label=label, color=sc_color, marker=marker)
 						if plot_means:
 							bar.horizontal_line(np.mean(b_normalised_to_stdmad), linestyle='--', linewidth=3, color=bar_color)
 						if plot_best_fit_line and f1 is not None:
-							k, n, r, _, _ = sp.stats.linregress([f1[model] for model in models], [bias[model][strat][metric] for model in models])
-							scatter.line(k, n, label=f'$R^2={fmt(r**2)}$')
-							size.line(k, n, label=f'$R^2={fmt(r**2)}$')
-			
+							clean_models = lfilter(lambda model: model not in outliers, models)
+							k, n, r, _, _ = sps.linregress([f1[model] for model in clean_models], [bias[model][strat][metric] for model in clean_models])
+							for s in scatter, size:
+								s.line(k, n, label=f'$R^2={fmt(r**2)}$', linewidth=3)
+
 			bump_metrics = 'CGD', 'FSD'
 			with Bump(fig_suffix, self.fig_dir, bump_metrics) as bump:
 				ranking = [sorted(models, key=lambda model: bias[model][strat][metric]) for metric in bump_metrics]
@@ -681,17 +687,17 @@ class Figure(ABC):
 	def vertical_line(self, *args, **kw):
 		return self.ax.axvline(*args, **kw)
 
-	def line(self, k, n, *, label=None, **kw):
-		line = self.ax.axline((0, n), slope=k, **kw)
+	def line(self, k, n, *, label=None, color=None, **kw):
+		line = self.ax.axline((0, n), slope=k, color=color, **kw)
 		xy = line.get_xydata()
 		self.ax.annotate(
 			label,
 			(xy[0] + xy[-1]) // 2,
 			xycoords='axes fraction',
-			fontsize=int(.5 * self.fontsize),
+			fontsize=self.fontsize,
 			ha='center', va='center_baseline',
 			rotation=k, rotation_mode='anchor',
-			**kw
+			color=color
 		)
 		return line
 
@@ -1107,7 +1113,7 @@ class Bump(Figure):
 					fmt(score),
 					(i, y[i]),
 					ha='center', va='center',
-					fontsize=int(.8 * self.fontsize),
+					fontsize=int(.9 * self.fontsize),
 					color=text_colour(color),
 					weight='heavy'
 				)
