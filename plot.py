@@ -1066,9 +1066,10 @@ class Heatmap(Figure):
 
 
 class Bump(Figure):
-	def __init__(self, name, save_dir, xticks, *, fontsize=30):
+	def __init__(self, name, save_dir, xticks, *, bump_radius=.3, fontsize=30):
 		super().__init__(name, save_dir, fontsize=fontsize)
 		self.xticks = xticks
+		self.r = bump_radius
 		self.rax = None
 		self.llabels = None
 		self.rlabels = None
@@ -1092,7 +1093,7 @@ class Bump(Figure):
 		self.ax.set_yticklabels([self.llabels[i] for i in range(ylen)])
 		self.rax.set_yticks(np.arange(ylen))
 		self.rax.set_yticklabels([self.rlabels[i] for i in range(ylen)])
-		self.ax.set_xlim(-.2, len(self.xticks) - .8)
+		self.ax.set_xlim(-self.r - .05, len(self.xticks) - .95 + self.r)
 		self.ax.set_ylim(-.5, ylen - .5)
 		self.ax.invert_yaxis()
 		self.ax.set_frame_on(False)
@@ -1101,12 +1102,13 @@ class Bump(Figure):
 
 	def plot(self, y, *, scores=None, label=None, color=None):
 		super().plot()
-		self.ax.plot(np.arange(len(y)), y, linewidth=3, color=color)
+		for x, (y1, y2) in enumerate(zip(y[:-1], y[1:])):
+			self.ax.plot([x - .05 + self.r, x + 1.05 - self.r], [y1, y2], linewidth=3, color=color)
 		if scores:
 			for i, score in enumerate(scores):
 				self.ax.add_artist(Ellipse(
 					(i, y[i]),
-					.35, .9,
+					2 * self.r, .95,
 					color=color
 				))
 				self.ax.annotate(
