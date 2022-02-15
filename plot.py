@@ -20,6 +20,7 @@ from compute import TRAIN_DATASETS, TEST_DATASETS, Plot  # Plot is needed for pi
 from abc import ABC, abstractmethod
 import contextlib
 from data.sets.mobius import Light
+from enum import Enum
 from evaluation import def_tick_format
 from evaluation.recognition import *
 import itertools as it
@@ -65,7 +66,7 @@ TRAIN_TEST_DICT = {train: [test for test in TEST_DATASETS if test not in train a
 TRAIN_TEST = [(train, test) for train, tests in TRAIN_TEST_DICT.items() for test in tests]  # List of all valid train-test configurations
 FIG_EXTS = ensure_iterable(FIG_EXTS, True)
 colourise = lambda x: zip(x, CMAP(np.linspace(0, 1, len(x))))
-fmt = lambda x: np.format_float_positional(x, precision=3, unique=False, fractional=False, trim='k')
+fmt = lambda x: np.format_float_positional(x, precision=3, fractional=False, trim='-')
 oom = lambda x: 10 ** math.floor(math.log10(x))  # Order of magnitude: oom(0.9) = 0.1, oom(30) = 10
 logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'PostScript backend' not in record.getMessage())  # Suppress matplotlib warnings about .eps transparency
 
@@ -155,8 +156,8 @@ class Main:
 			self._experiment2(attr)
 		self._experiment3()
 		#self._experiment4()
-		self._experiment5()
-		self._experiment6()
+		#self._experiment5()
+		#self._experiment6()
 
 		for strat in range(2):
 			with Heatmap("Overall (Stratified)" if strat else "Overall", self.fig_dir, self._bias_matrices[2]) as hmap:
@@ -225,7 +226,7 @@ class Main:
 		with (self.latex_dir/f'Bias - {name}.txt').open('w', encoding='utf-8') as bias_latex, \
 			(self.latex_dir/f'Performance - {name}.txt').open('w', encoding='utf-8') as f1_latex:
 			f1_latex.write(" & & ")
-			titled_values = [", ".join(v.title() for v in current_values.values()) for current_values in possible_values]
+			titled_values = [", ".join(str(v) if isinstance(v, Enum) else str(v).title() for v in current_values.values()) for current_values in possible_values]
 			f1_latex.write(" & ".join(fr"\textbf{{{v}}}" for v in titled_values))
 			f1_latex.write(r" \\\midrule")
 			f1_latex.write("\n")
@@ -233,13 +234,13 @@ class Main:
 			for model in models:
 				for train in TRAIN_TEST_DICT:
 					f1scores = self._results['seg'][model][train]['MOBIUS'][1]['F1-score']
-					if train not in bias or model not in bias[train]:
-						groups = [  # List of 1D arrays. Each 1D array contains per-image F1s for a specific attribute value combination (such as light=natural, phone=iPhone)
-							f1scores[[i for i, sample in enumerate(samples) if all(getattr(sample, attr) == current_values[attr] for attr in attrs)]]
-							for current_values in possible_values
-						]
-						bias[train][model] = self._compute_biases(groups)
+					groups = [  # List of 1D arrays. Each 1D array contains per-image F1s for a specific attribute value combination (such as light=natural, phone=iPhone)
+						f1scores[[i for i, sample in enumerate(samples) if all(getattr(sample, attr) == current_values[attr] for attr in attrs)]]
+						for current_values in possible_values
+					]
 
+					if train not in bias or model not in bias[train]:
+						bias[train][model] = self._compute_biases(groups)
 					self._save_biases(bias[train][model], f'{model} - {train} - {name}')
 					self._latexify_biases(bias[train][model], bias_latex, model, models, train, list(TRAIN_TEST_DICT))
 
@@ -255,7 +256,6 @@ class Main:
 			pickle.dump(bias, f)
 
 	def _experiment3(self):
-		#print("Experiment 3: Bias across different evaluation datasets", flush=True)
 		print("Experiment 3: Bias across different ethnicities", flush=True)
 		trains = [train for train in TRAIN_TEST_DICT if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD so we can consistently compute bias on all 3 evaluation datasets
 		sorted_trains = sorted(trains, key=lambda train: train.count('+'))
@@ -271,20 +271,27 @@ class Main:
 			bias = treedict()
 		bias_delta = treedict()
 
-		#with (self.latex_dir/'Bias - Test data.txt').open('w', encoding='utf-8') as latex:
-		with (self.latex_dir/'Bias - Ethnicities.txt').open('w', encoding='utf-8') as latex:
+		with (self.latex_dir/'Bias - Ethnicities.txt').open('w', encoding='utf-8') as bias_latex, \
+			(self.latex_dir/'Performance - Ethnicities.txt').open('w', encoding='utf-8') as f1_latex, \
+			(self.latex_dir/'Performance - Ethnicities (train).txt').open('w', encoding='utf-8') as train_latex:
 			for model in models:
 				for train in trains:
-					if train not in bias or model not in bias[train]:
-						#groups = [self._results['seg'][model][train][test][1]['F1-score'] for test in TRAIN_TEST_DICT[train]]
-						groups = [
-							self._results['seg'][model][train]['MOBIUS'][1]['F1-score'],
-							np.hstack((self._results['seg'][model][train]['SMD'][1]['F1-score'], self._results['seg'][model][train]['SLD'][1]['F1-score']))
-						]
-						bias[train][model] = self._compute_biases(groups)
+					groups = [
+						self._results['seg'][model][train]['MOBIUS'][1]['F1-score'],
+						np.hstack((self._results['seg'][model][train]['SMD'][1]['F1-score'], self._results['seg'][model][train]['SLD'][1]['F1-score']))
+					]
 
+					if train not in bias or model not in bias[train]:
+						bias[train][model] = self._compute_biases(groups)
 					self._save_biases(bias[train][model], f'{model} - {train}')
-					self._latexify_biases(bias[train][model], latex, model, models, train, trains)
+					self._latexify_biases(bias[train][model], bias_latex, model, models, train, trains)
+					
+					group_f1s = lmap(np.mean, groups)
+					total_f1 = np.hstack(groups).mean()
+					if train == 'MASD+SBVPI':
+						self._latexify_grouped_evals(group_f1s, total_f1, f1_latex, model, models)
+					self._latexify_grouped_evals(group_f1s, total_f1, train_latex, model, models, print_model=train==trains[0], print_total=False, end_line=train==trains[-1])
+
 				for strat in range(2):
 					for metric in bias[trains[0]][model][strat]:
 						bias_delta[model][strat][metric] = bias[sorted_trains[1]][model][strat][metric] - bias[sorted_trains[0]][model][strat][metric]
@@ -443,9 +450,9 @@ class Main:
 		latex.write(f" & {tests if test == tests[0] else test.ljust(max(map(len, tests[1:])))}")
 		for bp, metrics in enumerate((('F1-score', 'Precision', 'Recall', 'IoU'), ('F1-score', 'AUC'))):
 			for metric in metrics:
-				latex.write(f" & {fmt(mean_std[not bp][metric][0])} & ")
+				latex.write(f" & {mean_std[not bp][metric][0]:.3f} & ")
 				if test == tests[0]:  # First line of model
-					latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{fmt(hmean[not bp][metric])}}}")
+					latex.write(fr"\multirow{{{len(tests)}}}{{*}}{{{hmean[not bp][metric]:.3f}}}")
 		latex.write(r" \\")
 		if test == tests[-1] and model != self._sorted_models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
@@ -486,18 +493,23 @@ class Main:
 		if column2 == column2_values[0]:  # First line of model
 			latex.write(fr"\multirow{{{len(column2_values)}}}{{*}}{{{'Ensemble' if '+' in model else model}}}")
 		latex.write(f" & {column2 if column2 == column2_values[0] else column2.ljust(max(map(len, column2_values[1:])))}")
-		latex.write("".join(f" & ${fmt(bias[strat][metric])}$" for strat in (False, True) for metric in ('STD', 'MAD', 'CGD', 'FSD')))
+		latex.write("".join(f" & ${bias[strat][metric]:.3f}$" for strat in (False, True) for metric in ('STD', 'MAD', 'CGD', 'FSD')))
 		latex.write(r" \\")
 		if column2 == column2_values[-1] and model != models[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")
 		latex.write("\n")
 
-	def _latexify_grouped_evals(self, group_f1s, total_f1, latex, model, models):
-		latex.write(("Ensemble" if "+" in model else model).ljust(max(map(len, models))))
-		latex.write(f" & {fmt(total_f1)} & ")
-		latex.write(" & ".join(f"{fmt(f1)} ({fmt(total_f1 - f1)})" for f1 in group_f1s))
-		latex.write(r" \\")
-		latex.write("\n")
+	def _latexify_grouped_evals(self, group_f1s, total_f1, latex, model, models, print_model=True, print_total=True, end_line=True):
+		if print_model:
+			latex.write(("Ensemble" if "+" in model else model).ljust(max(map(len, models))) + " & ")
+		if print_total:
+			latex.write(f"${total_f1:.3f}$ & ")
+		latex.write(" & ".join(f"${f1:.3f}$ (${total_f1 - f1:.3f}$)" for f1 in group_f1s))
+		if end_line:
+			latex.write(r" \\")
+			latex.write("\n")
+		else:
+			latex.write(" & ")
 
 	def _plot_biases(self, bias, f1, models, fig_suffix, plot_means=True, plot_best_fit_line=True):
 		metrics = list(next(iter(bias.values()))[0])
@@ -582,7 +594,7 @@ class Main:
 			latex.write(fr"\multirow{{{len(models)}}}{{*}}{{{test}}}")
 		latex.write(f" & {model if model == models[0] else model.ljust(max(map(len, models[1:])))}")
 		for metric in ('EER', 'VER@1%FAR', 'VER@10%FAR', 'AUC'):
-			latex.write(fr" & ${fmt(ver_eval[metric].mean)} \pm {fmt(ver_eval[metric].std)}$")
+			latex.write(fr" & ${ver_eval[metric].mean:.3f} \pm {ver_eval[metric].std:.3f}$")
 		latex.write(r" \\")
 		if model == models[-1] and test != tests[-1]:  # Last line of model but not last line overall
 			latex.write(r"\hline")

@@ -19,6 +19,9 @@ class Direction(Enum):
 	STRAIGHT = S = CENTRE = C = 's'
 	UP = U = 'u'
 
+	def __str__(self):
+		return self.name.title()
+
 
 class _AbstractSample(ABC):
 	@classmethod

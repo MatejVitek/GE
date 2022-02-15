@@ -10,11 +10,19 @@ class Phone(OrderedEnum):
 	IPHONE = auto()
 	XIAOMI = auto()
 
+	def __str__(self):
+		if self.name.startswith('I'):
+			return 'i' + self.name[1:].title()
+		return self.name.title()
+
 
 class Light(OrderedEnum):
 	NATURAL = 'n'
 	INDOOR = 'i'
 	POOR = 'p'
+
+	def __str__(self):
+		return self.name.title()
 
 
 class _ExtraInfo:
