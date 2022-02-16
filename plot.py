@@ -529,27 +529,20 @@ class Main:
 
 				for i, (metric, bar_color) in enumerate(colourise(metrics)):
 					with (Scatter(f'Bias ({metric}) across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) if f1 is not None else contextlib.ExitStack()) as scatter, \
-						(Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) if f1 is not None else contextlib.ExitStack()) as size:  # Params as circle sizes
-						#(Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xscale='log', xlabel="# Parameters", ylabel="F1-score") if f1 is not None else contextlib.ExitStack()) as size:  # Params on x axis
+						(Scatter(f'Bias ({metric}) and Size across {fig_suffix}', self.fig_dir, xlabel="F1-score", ylabel=metric) if f1 is not None else contextlib.ExitStack()) as size:
 						b_normalised_to_stdmad = []
 						sm_min, sm_max = np.mean((bias_range['STD'][0], bias_range['MAD'][0])), np.mean((bias_range['STD'][1], bias_range['MAD'][1]))
 						for j, ((model, sc_color), label, marker) in enumerate(zip(colourise(models), labels, MARKERS)):
 							b = bias[model][strat][metric]
 							min_, max_ = bias_range[metric]
-							#b_normalised_to_01 = (b - min_) / (max_ - min_)  # Normalise bias to 0-1 range (for marker size in scatter plot)
 							b_normalised_to_stdmad.append((b - min_) / (max_ - min_) * (sm_max - sm_min) + sm_min if metric not in ('STD', 'MAD') else b)  # Normalise metrics other than σ and MAD to the range of these two (so we can plot them on the same graph)
 							bar.plot(b_normalised_to_stdmad[-1], j, i, label=metric, color=bar_color)
-							if f1 is not None and model not in outliers:
-								scatter.plot(f1[model], b, label=label, color=sc_color, marker=marker)
-								#size.plot(model_complexity[model.lower()][0], f1[model], 150*b_normalised_to_01, label=label, color=sc_color, marker=marker)
-								size.plot(f1[model], b, .01 * math.sqrt(model_complexity[model.lower()][0]), label=label, color=sc_color, marker=marker)
+							if f1 is not None:
+								legend_only = model in outliers
+								scatter.plot(f1[model], b, label=label, color=sc_color, marker=marker, legend_only=legend_only)
+								size.plot(f1[model], b, .01 * math.sqrt(model_complexity[model.lower()][0]), label=label, color=sc_color, marker=marker, legend_only=legend_only)
 						if plot_means:
 							bar.horizontal_line(np.mean(b_normalised_to_stdmad), linestyle='--', linewidth=3, color=bar_color)
-						if plot_best_fit_line and f1 is not None:
-							clean_models = lfilter(lambda model: model not in outliers, models)
-							k, n, r, _, _ = sps.linregress([f1[model] for model in clean_models], [bias[model][strat][metric] for model in clean_models])
-							for s in scatter, size:
-								s.line(k, n, label=f'$R^2={fmt(r**2)}$', linewidth=3)
 
 			bump_metrics = 'CGD', 'FSD'
 			with Bump(fig_suffix, self.fig_dir, bump_metrics) as bump:
@@ -677,8 +670,7 @@ class Figure(ABC):
 		diff = max_ - min_
 		return min(
 			oom(diff) * np.array([.1, .2, .5, 1, 2, 5]),  # Different possible tick sizes
-			# REQUIRES PYTHON>=3.8 key=lambda tick_size: (max(0, min_ticks - (n_ticks := diff // tick_size + 1), n_ticks - max_ticks), n_ticks)  # Return the one closest to the requested number of ticks. If several are in the range, return the one with the fewest ticks.
-			key=lambda tick_size: (max(0, min_ticks - diff // tick_size - 1, diff // tick_size + 1 - max_ticks), diff // tick_size + 1)
+			key=lambda tick_size: (max(0, min_ticks - (n_ticks := diff // tick_size + 1), n_ticks - max_ticks), n_ticks)  # Return the one closest to the requested number of ticks. If several are in the range, return the one with the fewest ticks.
 		)
 
 	def horizontal_line(self, *args, **kw):
@@ -686,20 +678,6 @@ class Figure(ABC):
 
 	def vertical_line(self, *args, **kw):
 		return self.ax.axvline(*args, **kw)
-
-	def line(self, k, n, *, label=None, color=None, **kw):
-		line = self.ax.axline((0, n), slope=k, color=color, **kw)
-		xy = line.get_xydata()
-		self.ax.annotate(
-			label,
-			(xy[0] + xy[-1]) // 2,
-			xycoords='axes fraction',
-			fontsize=self.fontsize,
-			ha='center', va='center_baseline',
-			rotation=k, rotation_mode='anchor',
-			color=color
-		)
-		return line
 
 
 class PR(Figure):
@@ -857,12 +835,13 @@ class Bar(Figure):
 
 
 class Scatter(Figure):
-	def __init__(self, name, save_dir, *, xlabel="F1-score", ylabel="Bias", xscale='linear', fontsize=28):
+	def __init__(self, name, save_dir, *, xlabel="F1-score", ylabel="Bias", xscale='linear', plot_best_fit=True, fontsize=28):
 		super().__init__(name, save_dir, fontsize=fontsize)
 		self.xscale = xscale
-		self.xmin = self.xmax = self.ymin = self.ymax = None
+		self.best_fit = plot_best_fit
 		self.xlabel = xlabel
 		self.ylabel = ylabel
+		self.x = self.y = None
 
 	def __enter__(self):
 		super().__enter__()
@@ -874,42 +853,67 @@ class Scatter(Figure):
 		self.ax.set_xlabel(self.xlabel)
 		self.ax.set_ylabel(self.ylabel)
 		self.fig.tight_layout(pad=0)
-		self.xmin = self.ymin = float('inf')
-		self.xmax = self.ymax = float('-inf')
+		self.x = []
+		self.y = []
 		return self
 
 	def close(self, *args, **kw):
-		xmin = self.xmin if self.xmin != float('inf') else 0
-		xmax = self.xmax if self.xmax != float('-inf') else 1
-		ymin = self.ymin if self.ymin != float('inf') else 0
-		ymax = self.ymax if self.ymax != float('-inf') else 1
+		xmin = min(self.x) if self.x else 0
+		xmax = max(self.x) if self.x else 1
+		ymin = min(self.y) if self.y else 0
+		ymax = max(self.y) if self.y else 1
+
 		if self.xscale == 'log':
-			self.ax.set_xlim(max(1, oom(.1 * xmin)), oom(10 * xmax))
+			xmin = max(1, oom(.1 * xmin))
+			xmax = oom(10 * xmax)
 		else:
 			xtick_size = self._nice_tick_size(xmin, xmax)
-			self.ax.set_xlim(max(0, xmin - xtick_size), xmax + xtick_size)
+			xmin = max(0, xmin - xtick_size)
+			xmax += xtick_size
 			self.ax.xaxis.set_major_locator(MultipleLocator(xtick_size))
 			self.ax.xaxis.set_minor_locator(MultipleLocator(xtick_size / 2))
 		ytick_size = self._nice_tick_size(ymin, ymax)
-		self.ax.set_ylim(max(0, ymin - ytick_size), ymax + ytick_size)
+		ymin = max(0, ymin - ytick_size)
+		ymax += ytick_size
 		self.ax.yaxis.set_major_locator(MultipleLocator(ytick_size))
 		self.ax.yaxis.set_minor_locator(MultipleLocator(ytick_size / 2))
+
+		if self.best_fit:
+			k, n, r, _, _ = sps.linregress(self.x, self.y)
+			self.ax.axline((0, n), slope=k, color='black')
+			txt_x = np.mean((xmin, xmax))
+			txt_y = k * txt_x + n
+			ax_bbox = self.ax.get_window_extent().transformed(self.fig.dpi_scale_trans.inverted())
+			angle = np.rad2deg(np.arctan2((txt_y - n) * ax_bbox.height / (ymax - ymin), txt_x * ax_bbox.width / (xmax - xmin)))  # https://stackoverflow.com/a/71132158/5769814
+			self.ax.annotate(
+				f"$R^2 = {r**2:.3f}$",
+				(txt_x, txt_y),
+				fontsize=.8 * self.fontsize,
+				ha='center', va='bottom',
+				rotation=angle, rotation_mode='anchor',
+				color='black'
+			)
+		
+		self.ax.set_xlim(xmin, xmax)
+		self.ax.set_ylim(ymin, ymax)
 		self.save(f'{self.name} (No Legend)')
 		if self.ax.get_legend_handles_labels()[0]:
 			self.ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
 		self.save()
 
-	def plot(self, x, y, size=None, *, label=None, color=None, marker=None):
+	def plot(self, x, y, size=None, *, legend_only=False, label=None, color=None, marker=None):
+		if legend_only:
+			self.ax.plot(np.nan, np.nan, marker, label=label, color=color)
+			return
+
 		super().plot()
 		markersize = 8
 		if size:
 			self.ax.plot(x, y, 'o', markersize=size, color=(*color[:3], .2))
 		self.ax.plot(x, y, marker, markersize=markersize, label=label, color=color)
 
-		self.xmin = min(self.xmin, x)
-		self.xmax = max(self.xmax, x)
-		self.ymin = min(self.ymin, y)
-		self.ymax = max(self.ymax, y)
+		self.x.append(x)
+		self.y.append(y)
 
 
 class ROC(Figure):
