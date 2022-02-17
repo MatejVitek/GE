@@ -15,6 +15,18 @@ from tkinter import *
 import tkinter.filedialog as filedialog
 from tqdm import tqdm
 
+# If you need EYEZ
+ROOT = Path(__file__).absolute().parent.parent/'EyeZ'
+if str(ROOT) not in sys.path:
+	sys.path.append(str(ROOT))
+from eyez.utils import EYEZ
+
+# Fix for pickles from linux
+import platform
+if platform.system().lower() == 'windows':
+	import pathlib
+	pathlib.PosixPath = pathlib.WindowsPath
+
 # Import whatever else is needed
 from compute import TRAIN_DATASETS, TEST_DATASETS, Plot  # Plot is needed for pickle loading
 from abc import ABC, abstractmethod
@@ -74,9 +86,9 @@ logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'Po
 class Main:
 	def __init__(self, *args, **kw):
 		# Default values
-		self.models = Path(args[0] if len(args) > 0 else kw.get('models', 'Models'))
-		self.datasets = Path(args[1] if len(args) > 1 else kw.get('datasets', 'Datasets'))
-		self.save = Path(args[2] if len(args) > 2 else kw.get('save', 'Results'))
+		self.models = Path(args[0] if len(args) > 0 else kw.get('models', EYEZ/'GE/Models'))
+		self.datasets = Path(args[1] if len(args) > 1 else kw.get('datasets', EYEZ/'GE/Datasets'))
+		self.save = Path(args[2] if len(args) > 2 else kw.get('save', EYEZ/'GE/Results'))
 		self.k = kw.get('k', 5)
 		self.discard = kw.get('discard', {'GFCM1', 'GFCM2', 'HSFCM', 'I-FCM', 'RSKFCM'})
 		self.plot = kw.get('plot', False)
@@ -114,25 +126,28 @@ class Main:
 				self._samples[test] = pickle.load(f)
 			with (test_dir/'Recognition.pkl').open('rb') as f:
 				self._results['dist'][test] = pickle.load(f)
-
-		for model_dir in self.models.iterdir():
+		
+		pbar = tqdm(list(self.models.iterdir()), desc="Reading pickles")
+		for model_dir in pbar:
 			model = model_dir.name
 			if model in self.discard:
 				continue
+			
 			for train, tests in TRAIN_TEST_DICT.items():
 				# Read results
 				for test in tests:
+					pbar.set_postfix(model=model, train=train, test=test)
 					try:
 						with (model_dir/f'Pickles/Segmentation/{train}_{test}.pkl').open('rb') as f:
 							for collection in ('seg', 'pr', 'mean_pr'):
 								self._results[collection][model][train][test] = pickle.load(f)
 					except IOError:
 						print(f"Missing segmentation results for {model} ({train} - {test})", flush=True)
-					try:
-						with (model_dir/f'Pickles/Recognition/{train}_{test}.pkl').open('rb') as f:
-							self._results['dist'][model][train][test] = pickle.load(f)
-					except IOError:
-						print(f"Missing recognition results for {model} ({train} - {test})", flush=True)
+					# try:
+					# 	with (model_dir/f'Pickles/Recognition/{train}_{test}.pkl').open('rb') as f:
+					# 		self._results['dist'][model][train][test] = pickle.load(f)
+					# except IOError:
+					# 	print(f"Missing recognition results for {model} ({train} - {test})", flush=True)
 
 				# Compute harmonic means
 				try:
@@ -155,9 +170,9 @@ class Main:
 		for attr in ATTR_EXP:
 			self._experiment2(attr)
 		self._experiment3()
-		#self._experiment4()
-		#self._experiment5()
-		#self._experiment6()
+		# self._experiment4()
+		# self._experiment5()
+		# self._experiment6()
 
 		for strat in range(2):
 			with Heatmap("Overall (Stratified)" if strat else "Overall", self.fig_dir, self._bias_matrices[2]) as hmap:
@@ -258,10 +273,11 @@ class Main:
 	def _experiment3(self):
 		print("Experiment 3: Bias across different ethnicities", flush=True)
 		trains = [train for train in TRAIN_TEST_DICT if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD so we can consistently compute bias on all 3 evaluation datasets
-		sorted_trains = sorted(trains, key=lambda train: train.count('+'))
+		trains = sorted(trains, key=lambda train: train.count('+'))
+		print(trains)
 		models = self._sorted_models# + ['RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN']
 
-		save_f = self.pkl_dir/f'Bias - Ethnicities.pkl'
+		save_f = self.pkl_dir/'Bias - Ethnicities.pkl'
 		if save_f.is_file():
 			print(f"Bias precomputed, loading from {save_f}", flush=True)
 			with save_f.open('rb') as f:
@@ -273,9 +289,10 @@ class Main:
 
 		with (self.latex_dir/'Bias - Ethnicities.txt').open('w', encoding='utf-8') as bias_latex, \
 			(self.latex_dir/'Performance - Ethnicities.txt').open('w', encoding='utf-8') as f1_latex, \
-			(self.latex_dir/'Performance - Ethnicities (train).txt').open('w', encoding='utf-8') as train_latex:
+			contextlib.ExitStack() as f1_stack:
+			train_cms = [f1_stack.enter_context((self.latex_dir/f'Performance - Ethnicities ({train})').open('w', encoding='utf-8')) for train in trains]
 			for model in models:
-				for train in trains:
+				for train, train_latex in zip(trains, train_cms):
 					groups = [
 						self._results['seg'][model][train]['MOBIUS'][1]['F1-score'],
 						np.hstack((self._results['seg'][model][train]['SMD'][1]['F1-score'], self._results['seg'][model][train]['SLD'][1]['F1-score']))
@@ -288,13 +305,12 @@ class Main:
 					
 					group_f1s = lmap(np.mean, groups)
 					total_f1 = np.hstack(groups).mean()
-					if train == 'MASD+SBVPI':
-						self._latexify_grouped_evals(group_f1s, total_f1, f1_latex, model, models)
-					self._latexify_grouped_evals(group_f1s, total_f1, train_latex, model, models, print_model=train==trains[0], print_total=False, end_line=train==trains[-1])
+					self._latexify_grouped_evals(group_f1s, total_f1, train_latex, model, models)
+					self._latexify_grouped_evals(group_f1s, total_f1, f1_latex, model, models, print_model=train==trains[0], print_total=False, end_line=train==trains[-1])
 
 				for strat in range(2):
 					for metric in bias[trains[0]][model][strat]:
-						bias_delta[model][strat][metric] = bias[sorted_trains[1]][model][strat][metric] - bias[sorted_trains[0]][model][strat][metric]
+						bias_delta[model][strat][metric] = bias[trains[1]][model][strat][metric] - bias[trains[0]][model][strat][metric]
 
 		for train in trains:
 			#self._plot_biases(bias[train], {model: self._results['hmean'][model][train][1]['F1-score'] for model in self._results['hmean']}, models, f"test data ({train})")
@@ -310,7 +326,7 @@ class Main:
 		tests = [test for test in TEST_DATASETS if test != 'SMD']  # Skip SMD so we can consistently compute bias on 5 training configurations
 		models = self._sorted_models# + ['ScleraU-Net2+FCN8+ScleraMaskRCNN']
 
-		save_f = self.pkl_dir/f'Bias - Train data.pkl'
+		save_f = self.pkl_dir/'Bias - Train data.pkl'
 		if save_f.is_file():
 			print(f"Bias precomputed, loading from {save_f}", flush=True)
 			with save_f.open('rb') as f:
@@ -459,7 +475,6 @@ class Main:
 		latex.write("\n")
 
 	def _compute_biases(self, subject_groups):
-		#TODO: Save and load biases to keep results consistent
 		# Both stratified (with size of smallest group rounded down to nearest 100) and non-stratified experiments will be run
 		n_samples = 100 * int(min(len(group) for group in subject_groups) / 100)
 		if n_samples == 0:
@@ -511,7 +526,7 @@ class Main:
 		else:
 			latex.write(" & ")
 
-	def _plot_biases(self, bias, f1, models, fig_suffix, plot_means=True, plot_best_fit_line=True):
+	def _plot_biases(self, bias, f1, models, fig_suffix, plot_means=True):
 		metrics = list(next(iter(bias.values()))[0])
 		labels = ["Ensemble" if '+' in model else model for model in models]
 		if f1 is not None:
