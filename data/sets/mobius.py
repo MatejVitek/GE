@@ -1,4 +1,3 @@
-from enum import auto
 from matej.enum import OrderedEnum
 from pathlib import Path
 
@@ -6,9 +5,9 @@ from . import Dataset, Sample, Direction as Dir
 
 
 class Phone(OrderedEnum):
-	XPERIA = auto()
-	IPHONE = auto()
-	XIAOMI = auto()
+	XPERIA = 1
+	IPHONE = 2
+	XIAOMI = 3
 
 	def __str__(self):
 		if self.name.startswith('I'):
