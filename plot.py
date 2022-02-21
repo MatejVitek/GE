@@ -7,7 +7,7 @@ from pathlib import Path
 from ast import literal_eval
 from joblib import delayed, Parallel
 from matej import make_module_callable
-from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lfilter, lmap, shuffled, treedict
+from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lmap, shuffled, treedict
 from matej.colour import text_colour
 from matej.parallel import tqdm_joblib
 import argparse
@@ -33,7 +33,6 @@ from abc import ABC, abstractmethod
 import contextlib
 from data.sets.mobius import Light
 from enum import Enum
-from evaluation import def_tick_format
 from evaluation.recognition import *
 import itertools as it
 import logging
@@ -56,7 +55,7 @@ from statistics import harmonic_mean
 
 
 # Constants
-ATTR_EXP = 'colour', 'light', 'phone', ('light', 'phone'), 'gaze'  # What to run attribute-based bias experiments on
+ATTR_EXP = 'colour', 'light', 'phone'#, ('light', 'phone'), 'gaze'  # What to run attribute-based bias experiments on
 FIG_EXTS = 'pdf',# 'png', 'svg', 'eps'  # Which formats to save figures to
 CMAP = plt.cm.plasma  # Colourmap to use in figures
 MARKERS = 'osP*Xv^<>p1234'
@@ -78,7 +77,8 @@ TRAIN_TEST_DICT = {train: [test for test in TEST_DATASETS if test not in train a
 TRAIN_TEST = [(train, test) for train, tests in TRAIN_TEST_DICT.items() for test in tests]  # List of all valid train-test configurations
 FIG_EXTS = ensure_iterable(FIG_EXTS, True)
 colourise = lambda x: zip(x, CMAP(np.linspace(0, 1, len(x))))
-fmt = lambda x: np.format_float_positional(x, precision=3, fractional=False, trim='-')
+large_fmt = lambda x, _=None: np.format_float_positional(x, precision=3, fractional=False, trim='-')  # For values that can go over absolute value of 1
+small_fmt = lambda x, _=None: np.format_float_positional(x, precision=3, trim='-')  # For values with absolute value between 0 and 1
 oom = lambda x: 10 ** math.floor(math.log10(x))  # Order of magnitude: oom(0.9) = 0.1, oom(30) = 10
 logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'PostScript backend' not in record.getMessage())  # Suppress matplotlib warnings about .eps transparency
 
@@ -669,7 +669,7 @@ class Figure(ABC):
 	def plot(self):
 		plt.rcParams['font.size'] = self.fontsize
 
-	def save(self, name=None, fig=None):
+	def save(self, name=None, fig=None, bbox='tight'):
 		if fig is None:
 			fig = self.fig
 		if name is None:
@@ -678,7 +678,7 @@ class Figure(ABC):
 		for ext in FIG_EXTS:
 			save = self.dir/f'{name}.{ext}'
 			print(f"Saving to {save}", flush=True)
-			fig.savefig(save, bbox_inches='tight')
+			fig.savefig(save, bbox_inches=bbox)
 
 	@staticmethod
 	def _nice_tick_size(min_, max_, min_ticks=3, max_ticks=7):
@@ -711,8 +711,8 @@ class PR(Figure):
 		for ax in self.axes:
 			ax.grid(which='major', alpha=.5)
 			ax.grid(which='minor', alpha=.2)
-			ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
-			ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+			ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+			ax.yaxis.set_major_formatter(FuncFormatter(small_fmt))
 			ax.margins(0)
 			ax.set_xlabel("Recall")
 			ax.set_ylabel("Precision")
@@ -797,7 +797,7 @@ class Bar(Figure):
 		super().__enter__(figsize=(15, 5))
 		self.ax.grid(axis='y', which='major', alpha=.5)
 		self.ax.grid(axis='y', which='minor', alpha=.2)
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(small_fmt))
 		self.ax.margins(0)
 		self.ax.set_ylabel(self.ylabel)
 		self.fig.tight_layout(pad=0)
@@ -850,7 +850,7 @@ class Bar(Figure):
 
 
 class Scatter(Figure):
-	def __init__(self, name, save_dir, *, xlabel="F1-score", ylabel="Bias", xscale='linear', plot_best_fit=True, fontsize=28):
+	def __init__(self, name, save_dir, *, xlabel="F1-score", ylabel="Bias", xscale='linear', plot_best_fit=True, fontsize=44):
 		super().__init__(name, save_dir, fontsize=fontsize)
 		self.xscale = xscale
 		self.best_fit = plot_best_fit
@@ -859,11 +859,10 @@ class Scatter(Figure):
 		self.x = self.y = None
 
 	def __enter__(self):
-		super().__enter__()
+		super().__enter__(figsize=(8, 6))
 		self.ax.grid(axis='y', which='major', alpha=.5)
 		self.ax.grid(axis='y', which='minor', alpha=.2)
 		self.ax.set_xscale(self.xscale)
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
 		self.ax.margins(0)
 		self.ax.set_xlabel(self.xlabel)
 		self.ax.set_ylabel(self.ylabel)
@@ -887,6 +886,8 @@ class Scatter(Figure):
 			xmax += xtick_size
 			self.ax.xaxis.set_major_locator(MultipleLocator(xtick_size))
 			self.ax.xaxis.set_minor_locator(MultipleLocator(xtick_size / 2))
+		self.ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(large_fmt if any(abs(y) > 1 for y in (ymin, ymax)) else small_fmt))
 		ytick_size = self._nice_tick_size(ymin, ymax)
 		ymin = max(0, ymin - ytick_size)
 		ymax += ytick_size
@@ -912,9 +913,17 @@ class Scatter(Figure):
 		self.ax.set_xlim(xmin, xmax)
 		self.ax.set_ylim(ymin, ymax)
 		self.save(f'{self.name} (No Legend)')
-		if self.ax.get_legend_handles_labels()[0]:
+		
+		handles, labels = self.ax.get_legend_handles_labels()
+		if handles:
 			self.ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
-		self.save()
+			self.save()
+
+			self.ax.clear()
+			self.ax.axis('off')
+			legend = self.ax.legend(handles, labels, ncol=4, handletextpad=0)
+			bbox = legend.get_window_extent().padded(2).transformed(self.fig.dpi_scale_trans.inverted())
+			self.save(f'{self.name} (Legend Only)', bbox=bbox)
 
 	def plot(self, x, y, size=None, *, legend_only=False, label=None, color=None, marker=None):
 		if legend_only:
@@ -943,8 +952,8 @@ class ROC(Figure):
 		self.ax.grid(which='major', alpha=.5)
 		self.ax.grid(which='minor', alpha=.2)
 		self.ax.set_xscale(self.xscale)
-		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(small_fmt))
 		self.ax.margins(0)
 		self.ax.set_xlabel(self.xlabel)
 		self.ax.set_ylabel(self.ylabel)
@@ -983,8 +992,8 @@ class CMC(Figure):
 		super().__enter__()
 		self.ax.grid(which='major', alpha=.5)
 		self.ax.grid(which='minor', alpha=.2)
-		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(small_fmt))
 		self.ax.margins(0)
 		self.ax.set_xlabel("n")
 		self.ax.set_ylabel("Rank-n accuracy")
@@ -1026,8 +1035,8 @@ class Histogram(Figure):
 			self.ax.set_xscale('function', functions=(lambda x: 10 ** x, np.log10))
 		else:
 			self.ax.set_xscale(self.xscale)
-		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(large_fmt))
 		self.ax.margins(0)
 		self.ax.set_xlabel(self.xlabel)
 		self.ax.set_ylabel(self.ylabel)
@@ -1131,7 +1140,7 @@ class Bump(Figure):
 					color=color
 				))
 				self.ax.annotate(
-					fmt(score),
+					large_fmt(score),
 					(i, y[i]),
 					ha='center', va='center',
 					fontsize=int(.9 * self.fontsize),
