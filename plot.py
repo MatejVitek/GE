@@ -66,7 +66,7 @@ model_complexity = {
 	'mu-net': (409e3, 180e9),
 	'rgb-ss-eye-ms': (22.7e6, None),
 	'scleramaskrcnn': (69e6, None),
-	'sclerasegnet': (59e6, 17.94e9),
+	'sclerasegnet': (24e6, 217e9),
 	'sclerau-net2': (3e6, 180e9)
 }
 for ensemble in ('RGB-SS-Eye-MS+ScleraU-Net2+FCN8', 'RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN', 'RGB-SS-Eye-MS+ScleraU-Net2+FCN8+ScleraSegNet', 'RGB-SS-Eye-MS+ScleraU-Net2+ScleraSegNet', 'ScleraU-Net2+FCN8+ScleraMaskRCNN'):
@@ -126,7 +126,7 @@ class Main:
 				self._samples[test] = pickle.load(f)
 			with (test_dir/'Recognition.pkl').open('rb') as f:
 				self._results['dist'][test] = pickle.load(f)
-		
+
 		pbar = tqdm(list(self.models.iterdir()), desc="Reading pickles")
 		for model_dir in pbar:
 			model = model_dir.name
