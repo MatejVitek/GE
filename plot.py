@@ -7,7 +7,7 @@ from pathlib import Path
 from ast import literal_eval
 from joblib import delayed, Parallel
 from matej import make_module_callable
-from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lmap, shuffled, treedict
+from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lfilter, lmap, shuffled, treedict
 from matej.colour import text_colour
 from matej.parallel import tqdm_joblib
 import argparse
@@ -622,8 +622,13 @@ class Main:
 				for name, results in per_image_f1s_and_recalls.items()
 				if (results[1] >= .001).all()  # Filter out near-0-recall (i.e. all-black) images
 			}
-			print(test, "Worst", sorted([(name, f1s.mean()) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1))[:10])
-			print(test, "Best", sorted([(name, harmonic_mean(f1s)) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1), reverse=True)[:10])
+			print(test, "Worst", sorted([(name, f1s.mean()) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1))[:30])
+			print(test, "Best", sorted([(name, harmonic_mean(f1s)) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1), reverse=True)[:30])
+			if test == 'MOBIUS':
+				for light in 'inp':
+					per_light_f1s = lfilter((lambda name_f1: light in name_f1[0]), per_image_f1s.items())
+					print(f"{test} ({light}) Worst:", sorted([(name, f1s.mean()) for name, f1s in per_light_f1s], key=op.itemgetter(1))[:10])
+					print(f"{test} ({light}) Best:", sorted([(name, harmonic_mean(f1s)) for name, f1s in per_light_f1s], key=op.itemgetter(1), reverse=True)[:10])
 
 	def process_command_line_options(self):
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
