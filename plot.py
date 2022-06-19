@@ -7,7 +7,7 @@ from pathlib import Path
 from ast import literal_eval
 from joblib import delayed, Parallel
 from matej import make_module_callable
-from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lfilter, lmap, shuffled, treedict
+from matej.collections import dict_product, DotDict, ensure_iterable, flatten, lmap, shuffled, treedict
 from matej.colour import text_colour
 from matej.parallel import tqdm_joblib
 import argparse
@@ -15,13 +15,24 @@ from tkinter import *
 import tkinter.filedialog as filedialog
 from tqdm import tqdm
 
+# If you need EYEZ
+ROOT = Path(__file__).absolute().parent.parent/'EyeZ'
+if str(ROOT) not in sys.path:
+	sys.path.append(str(ROOT))
+from eyez.utils import EYEZ
+
+# Fix for pickles from linux
+import platform
+if platform.system().lower() == 'windows':
+	import pathlib
+	pathlib.PosixPath = pathlib.WindowsPath
+
 # Import whatever else is needed
 from compute import TRAIN_DATASETS, TEST_DATASETS, Plot  # Plot is needed for pickle loading
 from abc import ABC, abstractmethod
 import contextlib
 from data.sets.mobius import Light
 from enum import Enum
-from evaluation import def_tick_format
 from evaluation.recognition import *
 import itertools as it
 import logging
@@ -44,7 +55,7 @@ from statistics import harmonic_mean
 
 
 # Constants
-ATTR_EXP = 'colour', 'light', 'phone', ('light', 'phone'), 'gaze'  # What to run attribute-based bias experiments on
+ATTR_EXP = 'colour', 'light', 'phone'#, ('light', 'phone'), 'gaze'  # What to run attribute-based bias experiments on
 FIG_EXTS = 'pdf',# 'png', 'svg', 'eps'  # Which formats to save figures to
 CMAP = plt.cm.plasma  # Colourmap to use in figures
 MARKERS = 'osP*Xv^<>p1234'
@@ -55,7 +66,7 @@ model_complexity = {
 	'mu-net': (409e3, 180e9),
 	'rgb-ss-eye-ms': (22.7e6, None),
 	'scleramaskrcnn': (69e6, None),
-	'sclerasegnet': (59e6, 17.94e9),
+	'sclerasegnet': (24e6, 217e9),
 	'sclerau-net2': (3e6, 180e9)
 }
 for ensemble in ('RGB-SS-Eye-MS+ScleraU-Net2+FCN8', 'RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN', 'RGB-SS-Eye-MS+ScleraU-Net2+FCN8+ScleraSegNet', 'RGB-SS-Eye-MS+ScleraU-Net2+ScleraSegNet', 'ScleraU-Net2+FCN8+ScleraMaskRCNN'):
@@ -66,7 +77,8 @@ TRAIN_TEST_DICT = {train: [test for test in TEST_DATASETS if test not in train a
 TRAIN_TEST = [(train, test) for train, tests in TRAIN_TEST_DICT.items() for test in tests]  # List of all valid train-test configurations
 FIG_EXTS = ensure_iterable(FIG_EXTS, True)
 colourise = lambda x: zip(x, CMAP(np.linspace(0, 1, len(x))))
-fmt = lambda x: np.format_float_positional(x, precision=3, fractional=False, trim='-')
+large_fmt = lambda x, _=None: np.format_float_positional(x, precision=3, fractional=False, trim='-')  # For values that can go over absolute value of 1
+small_fmt = lambda x, _=None: np.format_float_positional(x, precision=3, trim='-')  # For values with absolute value between 0 and 1
 oom = lambda x: 10 ** math.floor(math.log10(x))  # Order of magnitude: oom(0.9) = 0.1, oom(30) = 10
 logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'PostScript backend' not in record.getMessage())  # Suppress matplotlib warnings about .eps transparency
 
@@ -74,9 +86,9 @@ logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'Po
 class Main:
 	def __init__(self, *args, **kw):
 		# Default values
-		self.models = Path(args[0] if len(args) > 0 else kw.get('models', 'Models'))
-		self.datasets = Path(args[1] if len(args) > 1 else kw.get('datasets', 'Datasets'))
-		self.save = Path(args[2] if len(args) > 2 else kw.get('save', 'Results'))
+		self.models = Path(args[0] if len(args) > 0 else kw.get('models', EYEZ/'GE/Models'))
+		self.datasets = Path(args[1] if len(args) > 1 else kw.get('datasets', EYEZ/'GE/Datasets'))
+		self.save = Path(args[2] if len(args) > 2 else kw.get('save', EYEZ/'GE/Results'))
 		self.k = kw.get('k', 5)
 		self.discard = kw.get('discard', {'GFCM1', 'GFCM2', 'HSFCM', 'I-FCM', 'RSKFCM'})
 		self.plot = kw.get('plot', False)
@@ -115,24 +127,27 @@ class Main:
 			with (test_dir/'Recognition.pkl').open('rb') as f:
 				self._results['dist'][test] = pickle.load(f)
 
-		for model_dir in self.models.iterdir():
+		pbar = tqdm(list(self.models.iterdir()), desc="Reading pickles")
+		for model_dir in pbar:
 			model = model_dir.name
 			if model in self.discard:
 				continue
+			
 			for train, tests in TRAIN_TEST_DICT.items():
 				# Read results
 				for test in tests:
+					pbar.set_postfix(model=model, train=train, test=test)
 					try:
 						with (model_dir/f'Pickles/Segmentation/{train}_{test}.pkl').open('rb') as f:
 							for collection in ('seg', 'pr', 'mean_pr'):
 								self._results[collection][model][train][test] = pickle.load(f)
 					except IOError:
 						print(f"Missing segmentation results for {model} ({train} - {test})", flush=True)
-					try:
-						with (model_dir/f'Pickles/Recognition/{train}_{test}.pkl').open('rb') as f:
-							self._results['dist'][model][train][test] = pickle.load(f)
-					except IOError:
-						print(f"Missing recognition results for {model} ({train} - {test})", flush=True)
+					# try:
+					# 	with (model_dir/f'Pickles/Recognition/{train}_{test}.pkl').open('rb') as f:
+					# 		self._results['dist'][model][train][test] = pickle.load(f)
+					# except IOError:
+					# 	print(f"Missing recognition results for {model} ({train} - {test})", flush=True)
 
 				# Compute harmonic means
 				try:
@@ -155,9 +170,9 @@ class Main:
 		for attr in ATTR_EXP:
 			self._experiment2(attr)
 		self._experiment3()
-		#self._experiment4()
-		#self._experiment5()
-		#self._experiment6()
+		# self._experiment4()
+		# self._experiment5()
+		# self._experiment6()
 
 		for strat in range(2):
 			with Heatmap("Overall (Stratified)" if strat else "Overall", self.fig_dir, self._bias_matrices[2]) as hmap:
@@ -258,10 +273,11 @@ class Main:
 	def _experiment3(self):
 		print("Experiment 3: Bias across different ethnicities", flush=True)
 		trains = [train for train in TRAIN_TEST_DICT if train != 'All' and 'SMD' not in train]  # Skip models trained on SMD so we can consistently compute bias on all 3 evaluation datasets
-		sorted_trains = sorted(trains, key=lambda train: train.count('+'))
+		trains = sorted(trains, key=lambda train: train.count('+'))
+		print(trains)
 		models = self._sorted_models# + ['RGB-SS-Eye-MS+CGANs2020CL+FCN8+ScleraMaskRCNN']
 
-		save_f = self.pkl_dir/f'Bias - Ethnicities.pkl'
+		save_f = self.pkl_dir/'Bias - Ethnicities.pkl'
 		if save_f.is_file():
 			print(f"Bias precomputed, loading from {save_f}", flush=True)
 			with save_f.open('rb') as f:
@@ -273,9 +289,10 @@ class Main:
 
 		with (self.latex_dir/'Bias - Ethnicities.txt').open('w', encoding='utf-8') as bias_latex, \
 			(self.latex_dir/'Performance - Ethnicities.txt').open('w', encoding='utf-8') as f1_latex, \
-			(self.latex_dir/'Performance - Ethnicities (train).txt').open('w', encoding='utf-8') as train_latex:
+			contextlib.ExitStack() as f1_stack:
+			train_cms = [f1_stack.enter_context((self.latex_dir/f'Performance - Ethnicities ({train})').open('w', encoding='utf-8')) for train in trains]
 			for model in models:
-				for train in trains:
+				for train, train_latex in zip(trains, train_cms):
 					groups = [
 						self._results['seg'][model][train]['MOBIUS'][1]['F1-score'],
 						np.hstack((self._results['seg'][model][train]['SMD'][1]['F1-score'], self._results['seg'][model][train]['SLD'][1]['F1-score']))
@@ -288,13 +305,12 @@ class Main:
 					
 					group_f1s = lmap(np.mean, groups)
 					total_f1 = np.hstack(groups).mean()
-					if train == 'MASD+SBVPI':
-						self._latexify_grouped_evals(group_f1s, total_f1, f1_latex, model, models)
-					self._latexify_grouped_evals(group_f1s, total_f1, train_latex, model, models, print_model=train==trains[0], print_total=False, end_line=train==trains[-1])
+					self._latexify_grouped_evals(group_f1s, total_f1, train_latex, model, models)
+					self._latexify_grouped_evals(group_f1s, total_f1, f1_latex, model, models, print_model=train==trains[0], print_total=False, end_line=train==trains[-1])
 
 				for strat in range(2):
 					for metric in bias[trains[0]][model][strat]:
-						bias_delta[model][strat][metric] = bias[sorted_trains[1]][model][strat][metric] - bias[sorted_trains[0]][model][strat][metric]
+						bias_delta[model][strat][metric] = bias[trains[1]][model][strat][metric] - bias[trains[0]][model][strat][metric]
 
 		for train in trains:
 			#self._plot_biases(bias[train], {model: self._results['hmean'][model][train][1]['F1-score'] for model in self._results['hmean']}, models, f"test data ({train})")
@@ -310,7 +326,7 @@ class Main:
 		tests = [test for test in TEST_DATASETS if test != 'SMD']  # Skip SMD so we can consistently compute bias on 5 training configurations
 		models = self._sorted_models# + ['ScleraU-Net2+FCN8+ScleraMaskRCNN']
 
-		save_f = self.pkl_dir/f'Bias - Train data.pkl'
+		save_f = self.pkl_dir/'Bias - Train data.pkl'
 		if save_f.is_file():
 			print(f"Bias precomputed, loading from {save_f}", flush=True)
 			with save_f.open('rb') as f:
@@ -459,7 +475,6 @@ class Main:
 		latex.write("\n")
 
 	def _compute_biases(self, subject_groups):
-		#TODO: Save and load biases to keep results consistent
 		# Both stratified (with size of smallest group rounded down to nearest 100) and non-stratified experiments will be run
 		n_samples = 100 * int(min(len(group) for group in subject_groups) / 100)
 		if n_samples == 0:
@@ -511,7 +526,7 @@ class Main:
 		else:
 			latex.write(" & ")
 
-	def _plot_biases(self, bias, f1, models, fig_suffix, plot_means=True, plot_best_fit_line=True):
+	def _plot_biases(self, bias, f1, models, fig_suffix, plot_means=True):
 		metrics = list(next(iter(bias.values()))[0])
 		labels = ["Ensemble" if '+' in model else model for model in models]
 		if f1 is not None:
@@ -654,7 +669,7 @@ class Figure(ABC):
 	def plot(self):
 		plt.rcParams['font.size'] = self.fontsize
 
-	def save(self, name=None, fig=None):
+	def save(self, name=None, fig=None, bbox='tight'):
 		if fig is None:
 			fig = self.fig
 		if name is None:
@@ -663,7 +678,7 @@ class Figure(ABC):
 		for ext in FIG_EXTS:
 			save = self.dir/f'{name}.{ext}'
 			print(f"Saving to {save}", flush=True)
-			fig.savefig(save, bbox_inches='tight')
+			fig.savefig(save, bbox_inches=bbox)
 
 	@staticmethod
 	def _nice_tick_size(min_, max_, min_ticks=3, max_ticks=7):
@@ -696,8 +711,8 @@ class PR(Figure):
 		for ax in self.axes:
 			ax.grid(which='major', alpha=.5)
 			ax.grid(which='minor', alpha=.2)
-			ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
-			ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+			ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+			ax.yaxis.set_major_formatter(FuncFormatter(small_fmt))
 			ax.margins(0)
 			ax.set_xlabel("Recall")
 			ax.set_ylabel("Precision")
@@ -782,7 +797,7 @@ class Bar(Figure):
 		super().__enter__(figsize=(15, 5))
 		self.ax.grid(axis='y', which='major', alpha=.5)
 		self.ax.grid(axis='y', which='minor', alpha=.2)
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(small_fmt))
 		self.ax.margins(0)
 		self.ax.set_ylabel(self.ylabel)
 		self.fig.tight_layout(pad=0)
@@ -835,7 +850,7 @@ class Bar(Figure):
 
 
 class Scatter(Figure):
-	def __init__(self, name, save_dir, *, xlabel="F1-score", ylabel="Bias", xscale='linear', plot_best_fit=True, fontsize=28):
+	def __init__(self, name, save_dir, *, xlabel="F1-score", ylabel="Bias", xscale='linear', plot_best_fit=True, fontsize=44):
 		super().__init__(name, save_dir, fontsize=fontsize)
 		self.xscale = xscale
 		self.best_fit = plot_best_fit
@@ -844,11 +859,10 @@ class Scatter(Figure):
 		self.x = self.y = None
 
 	def __enter__(self):
-		super().__enter__()
+		super().__enter__(figsize=(8, 6))
 		self.ax.grid(axis='y', which='major', alpha=.5)
 		self.ax.grid(axis='y', which='minor', alpha=.2)
 		self.ax.set_xscale(self.xscale)
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
 		self.ax.margins(0)
 		self.ax.set_xlabel(self.xlabel)
 		self.ax.set_ylabel(self.ylabel)
@@ -872,6 +886,8 @@ class Scatter(Figure):
 			xmax += xtick_size
 			self.ax.xaxis.set_major_locator(MultipleLocator(xtick_size))
 			self.ax.xaxis.set_minor_locator(MultipleLocator(xtick_size / 2))
+		self.ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(large_fmt if any(abs(y) > 1 for y in (ymin, ymax)) else small_fmt))
 		ytick_size = self._nice_tick_size(ymin, ymax)
 		ymin = max(0, ymin - ytick_size)
 		ymax += ytick_size
@@ -897,9 +913,17 @@ class Scatter(Figure):
 		self.ax.set_xlim(xmin, xmax)
 		self.ax.set_ylim(ymin, ymax)
 		self.save(f'{self.name} (No Legend)')
-		if self.ax.get_legend_handles_labels()[0]:
+		
+		handles, labels = self.ax.get_legend_handles_labels()
+		if handles:
 			self.ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
-		self.save()
+			self.save()
+
+			self.ax.clear()
+			self.ax.axis('off')
+			legend = self.ax.legend(handles, labels, ncol=4, handletextpad=0)
+			bbox = legend.get_window_extent().padded(2).transformed(self.fig.dpi_scale_trans.inverted())
+			self.save(f'{self.name} (Legend Only)', bbox=bbox)
 
 	def plot(self, x, y, size=None, *, legend_only=False, label=None, color=None, marker=None):
 		if legend_only:
@@ -928,8 +952,8 @@ class ROC(Figure):
 		self.ax.grid(which='major', alpha=.5)
 		self.ax.grid(which='minor', alpha=.2)
 		self.ax.set_xscale(self.xscale)
-		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(small_fmt))
 		self.ax.margins(0)
 		self.ax.set_xlabel(self.xlabel)
 		self.ax.set_ylabel(self.ylabel)
@@ -968,8 +992,8 @@ class CMC(Figure):
 		super().__enter__()
 		self.ax.grid(which='major', alpha=.5)
 		self.ax.grid(which='minor', alpha=.2)
-		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(small_fmt))
 		self.ax.margins(0)
 		self.ax.set_xlabel("n")
 		self.ax.set_ylabel("Rank-n accuracy")
@@ -1011,8 +1035,8 @@ class Histogram(Figure):
 			self.ax.set_xscale('function', functions=(lambda x: 10 ** x, np.log10))
 		else:
 			self.ax.set_xscale(self.xscale)
-		self.ax.xaxis.set_major_formatter(FuncFormatter(def_tick_format))
-		self.ax.yaxis.set_major_formatter(FuncFormatter(def_tick_format))
+		self.ax.xaxis.set_major_formatter(FuncFormatter(small_fmt))
+		self.ax.yaxis.set_major_formatter(FuncFormatter(large_fmt))
 		self.ax.margins(0)
 		self.ax.set_xlabel(self.xlabel)
 		self.ax.set_ylabel(self.ylabel)
@@ -1116,7 +1140,7 @@ class Bump(Figure):
 					color=color
 				))
 				self.ax.annotate(
-					fmt(score),
+					large_fmt(score),
 					(i, y[i]),
 					ha='center', va='center',
 					fontsize=int(.9 * self.fontsize),
