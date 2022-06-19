@@ -15,12 +15,6 @@ from tkinter import *
 import tkinter.filedialog as filedialog
 from tqdm import tqdm
 
-# If you need EYEZ
-ROOT = Path(__file__).absolute().parent.parent/'EyeZ'
-if str(ROOT) not in sys.path:
-	sys.path.append(str(ROOT))
-from eyez.utils import EYEZ
-
 # Fix for pickles from linux
 import platform
 if platform.system().lower() == 'windows':
@@ -86,9 +80,9 @@ logging.getLogger('matplotlib.backends.backend_ps').addFilter(lambda record: 'Po
 class Main:
 	def __init__(self, *args, **kw):
 		# Default values
-		self.models = Path(args[0] if len(args) > 0 else kw.get('models', EYEZ/'GE/Models'))
-		self.datasets = Path(args[1] if len(args) > 1 else kw.get('datasets', EYEZ/'GE/Datasets'))
-		self.save = Path(args[2] if len(args) > 2 else kw.get('save', EYEZ/'GE/Results'))
+		self.models = Path(args[0] if len(args) > 0 else kw.get('models', 'Models'))
+		self.datasets = Path(args[1] if len(args) > 1 else kw.get('datasets', 'Datasets'))
+		self.save = Path(args[2] if len(args) > 2 else kw.get('save', 'Results'))
 		self.k = kw.get('k', 5)
 		self.discard = kw.get('discard', {'GFCM1', 'GFCM2', 'HSFCM', 'I-FCM', 'RSKFCM'})
 		self.plot = kw.get('plot', False)
@@ -132,7 +126,7 @@ class Main:
 			model = model_dir.name
 			if model in self.discard:
 				continue
-			
+
 			for train, tests in TRAIN_TEST_DICT.items():
 				# Read results
 				for test in tests:
@@ -164,15 +158,18 @@ class Main:
 			reverse=True
 		)
 
+		# Get edge cases where performance is low across most models
+		self._best_and_worst_cases()
+
 		self._bias_matrices = [[], [], []]
 
-		self._experiment1()
+		self._experiment1()  # Overall segmentation
 		for attr in ATTR_EXP:
-			self._experiment2(attr)
-		self._experiment3()
-		# self._experiment4()
-		# self._experiment5()
-		# self._experiment6()
+			self._experiment2(attr)  # Segmentation bias over image characteristics (light, phone, gaze...)
+		self._experiment3()  # Segmentation bias over ethnicities
+		# self._experiment4()  # Segmentation bias over training data
+		# self._experiment5()  # Overall recognition
+		# self._experiment6()  # Recognition on bias groups
 
 		for strat in range(2):
 			with Heatmap("Overall (Stratified)" if strat else "Overall", self.fig_dir, self._bias_matrices[2]) as hmap:
@@ -302,7 +299,7 @@ class Main:
 						bias[train][model] = self._compute_biases(groups)
 					self._save_biases(bias[train][model], f'{model} - {train}')
 					self._latexify_biases(bias[train][model], bias_latex, model, models, train, trains)
-					
+
 					group_f1s = lmap(np.mean, groups)
 					total_f1 = np.hstack(groups).mean()
 					self._latexify_grouped_evals(group_f1s, total_f1, train_latex, model, models)
@@ -614,6 +611,20 @@ class Main:
 			latex.write(r"\hline")
 		latex.write("\n")
 
+	def _best_and_worst_cases(self):
+		for test in 'MOBIUS', 'SLD':
+			per_image_f1s_and_recalls = {
+				sample.bname: np.array([(model_results['All'][test][1]['F1-score'][i], model_results['All'][test][1]['Recall'][i]) for model_results in self._results['seg'].values()]).T
+				for i, sample in enumerate(self._samples[test])
+			}
+			per_image_f1s = {
+				name: results[0]
+				for name, results in per_image_f1s_and_recalls.items()
+				if (results[1] >= .001).all()  # Filter out near-0-recall (i.e. all-black) images
+			}
+			print(test, "Worst", sorted([(name, f1s.mean()) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1))[:10])
+			print(test, "Best", sorted([(name, harmonic_mean(f1s)) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1), reverse=True)[:10])
+
 	def process_command_line_options(self):
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
 		ap.add_argument('models', type=Path, nargs='?', default=self.models, help="directory with model information")
@@ -909,11 +920,11 @@ class Scatter(Figure):
 				rotation=angle, rotation_mode='anchor',
 				color='black'
 			)
-		
+
 		self.ax.set_xlim(xmin, xmax)
 		self.ax.set_ylim(ymin, ymax)
 		self.save(f'{self.name} (No Legend)')
-		
+
 		handles, labels = self.ax.get_legend_handles_labels()
 		if handles:
 			self.ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
