@@ -34,7 +34,7 @@ import math
 from matplotlib.lines import Line2D
 from matplotlib.patches import Ellipse
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter, MultipleLocator
+from matplotlib.ticker import FuncFormatter, MultipleLocator, NullLocator
 from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
 import numpy as np
 import operator as op
@@ -49,7 +49,7 @@ from statistics import harmonic_mean
 
 
 # Constants
-ATTR_EXP = 'colour', 'light', 'phone'#, ('light', 'phone'), 'gaze'  # What to run attribute-based bias experiments on
+ATTR_EXP = 'colour', 'light', 'phone', 'gaze'#, ('light', 'phone')  # What to run attribute-based bias experiments on
 FIG_EXTS = 'pdf',# 'png', 'svg', 'eps'  # Which formats to save figures to
 CMAP = plt.cm.plasma  # Colourmap to use in figures
 MARKERS = 'osP*Xv^<>p1234'
@@ -612,23 +612,24 @@ class Main:
 		latex.write("\n")
 
 	def _best_and_worst_cases(self):
+		model_results = {model: results for model, results in self._results['seg'].items() if '+' not in model}  # Filter out ensembles
+		print(model_results.keys())
 		for test in 'MOBIUS', 'SLD':
-			per_image_f1s_and_recalls = {
-				sample.bname: np.array([(model_results['All'][test][1]['F1-score'][i], model_results['All'][test][1]['Recall'][i]) for model_results in self._results['seg'].values()]).T
-				for i, sample in enumerate(self._samples[test])
-			}
-			per_image_f1s = {
-				name: results[0]
-				for name, results in per_image_f1s_and_recalls.items()
-				if (results[1] >= .001).all()  # Filter out near-0-recall (i.e. all-black) images
-			}
-			print(test, "Worst", sorted([(name, f1s.mean()) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1))[:30])
-			print(test, "Best", sorted([(name, harmonic_mean(f1s)) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1), reverse=True)[:30])
+			per_image_f1s = {}
+			for i, sample in enumerate(self._samples[test]):
+				if any(results['All'][test][1]['Recall'][i] < .001 for results in model_results.values()):
+					continue  # Filter out sample if any model has a near-0-recall (i.e. all-black) prediction
+				per_image_f1s[sample.bname] = np.array([
+					results['All'][test][1]['F1-score'][i]
+					for results in model_results.values()
+				])
+			print(test, "Worst", sorted([(name, f1s.mean(), f1s) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1))[:10])
+			print(test, "Best", sorted([(name, harmonic_mean(f1s), f1s) for name, f1s in per_image_f1s.items()], key=op.itemgetter(1), reverse=True)[:10])
 			if test == 'MOBIUS':
 				for light in 'inp':
 					per_light_f1s = lfilter((lambda name_f1: light in name_f1[0]), per_image_f1s.items())
-					print(f"{test} ({light}) Worst:", sorted([(name, f1s.mean()) for name, f1s in per_light_f1s], key=op.itemgetter(1))[:10])
-					print(f"{test} ({light}) Best:", sorted([(name, harmonic_mean(f1s)) for name, f1s in per_light_f1s], key=op.itemgetter(1), reverse=True)[:10])
+					print(f"{test} ({light}) Worst:", sorted([(name, f1s.mean(), f1s) for name, f1s in per_light_f1s], key=op.itemgetter(1))[:5])
+					print(f"{test} ({light}) Best:", sorted([(name, harmonic_mean(f1s), f1s) for name, f1s in per_light_f1s], key=op.itemgetter(1), reverse=True)[:5])
 
 	def process_command_line_options(self):
 		ap = argparse.ArgumentParser(description="Evaluate segmentation results.")
@@ -866,7 +867,7 @@ class Bar(Figure):
 
 
 class Scatter(Figure):
-	def __init__(self, name, save_dir, *, xlabel="F1-score", ylabel="Bias", xscale='linear', plot_best_fit=True, fontsize=44):
+	def __init__(self, name, save_dir, *, xlabel="F1-score", ylabel="Bias", xscale='linear', plot_best_fit=True, fontsize=32):
 		super().__init__(name, save_dir, fontsize=fontsize)
 		self.xscale = xscale
 		self.best_fit = plot_best_fit
@@ -937,9 +938,11 @@ class Scatter(Figure):
 
 			self.ax.clear()
 			self.ax.axis('off')
-			legend = self.ax.legend(handles, labels, ncol=4, handletextpad=0)
-			bbox = legend.get_window_extent().padded(2).transformed(self.fig.dpi_scale_trans.inverted())
-			self.save(f'{self.name} (Legend Only)', bbox=bbox)
+			self.ax.xaxis.set_major_locator(NullLocator())
+			self.ax.yaxis.set_major_locator(NullLocator())
+			legend = self.ax.legend(handles, labels, ncol=4, borderaxespad=0, borderpad=.2, columnspacing=0, handletextpad=-.5)
+			#bbox = legend.get_window_extent().transformed(self.fig.dpi_scale_trans.inverted())  # Doesn't work with PDF
+			self.save(f'{self.name} (Legend Only)')#, bbox=bbox)
 
 	def plot(self, x, y, size=None, *, legend_only=False, label=None, color=None, marker=None):
 		if legend_only:
