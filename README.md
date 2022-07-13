@@ -13,7 +13,7 @@ Our [utility libraries](https://sclera.fri.uni-lj.si/code.html#Libraries) are re
 	scikit-learn
 	scipy
 	tqdm
-  opencv-python~=3.4.2
+	opencv-python~=3.4.2
 
 # Running the code
 This project is a stripped-down version of [our Toolbox](https://sclera.fri.uni-lj.si/code.html#Toolbox). The project's functionality is divided into two parts—computation (slow and memory-intensive) and plotting (fast and efficient).
