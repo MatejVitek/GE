@@ -25,42 +25,44 @@ The computation part takes as input the sclera masks output by your model(s), an
 
 The directory `/path/to/model/results/` should contain a separate subdirectory for each of your segmentation models. If you are only computing results for a single segmentation model, use only one subdirectory. Inside each of these model subdirectories should be different folders for different training configurations. In our paper we used 5 different training configurations: `All`, `MASD+SBVPI`, `MASD+SMD`, `SBVPI`, and `SMD`. Inside each of these should be a folder for each testing dataset: `MOBIUS`, `SLD`, and `SMD`. Finally, inside each of these, there should be two folders: `Predictions` (which contains greyscale probabilistic sclera masks output by your model before thresholding) and `Binarised` (which contains the binary black & white sclera masks obtained after thresholding). See below for a sample tree structure with two models called Segmentor and Segmentator:
 
-    /path/to/model/results/
-    └── Segmentor/
-        ├── All/
-        │   ├── MOBIUS/
-        │   │   ├── Predictions/
-        │   │   │   ├── 1_1i_Ll_1.png
-        │   │   │   ├── 1_1i_Ll_2.png
-        │   │   │   ├── 1_1i_Lr_1.png
-        │   │   │   └── ...
-        │   │   └── Binarised/
-        │   │       ├── 1_1i_Ll_1.png
-        │   │       ├── 1_1i_Ll_2.png
-        │   │       ├── 1_1i_Lr_1.png
-        │   │       └── ...
-        │   ├── SLD/
-        │   │   ├── Predictions/
-        │   │   │   ├── 1 (1).png
-        │   │   │   └── ...
-        │   │   └── Binarised/
-        │   │       ├── 1 (1).png
-        │   │       └── ...
-        │   └── SMD/
-        │       └── ...
-        ├── MASD+SBVPI/
-        │   ├── MOBIUS/
-        │   │   └── ...
-        │   ├── SLD/
-        │   │   └── ...
-        │   └── SMD/
-        │       └── ...
-        ├── MASD+SMD/
-        │   └── ...
-        ├── SBVPI/
-        │   └── ...
-        └── SMD/
-            └── ...
+	/path/to/model/results/
+	├── Segmentor/
+	│   ├── All/
+	│   │   ├── MOBIUS/
+	│   │   │   ├── Predictions/
+	│   │   │   │   ├── 1_1i_Ll_1.png
+	│   │   │   │   ├── 1_1i_Ll_2.png
+	│   │   │   │   ├── 1_1i_Lr_1.png
+	│   │   │   │   └── ...
+	│   │   │   └── Binarised/
+	│   │   │       ├── 1_1i_Ll_1.png
+	│   │   │       ├── 1_1i_Ll_2.png
+	│   │   │       ├── 1_1i_Lr_1.png
+	│   │   │       └── ...
+	│   │   ├── SLD/
+	│   │   │   ├── Predictions/
+	│   │   │   │   ├── 1 (1).png
+	│   │   │   │   └── ...
+	│   │   │   └── Binarised/
+	│   │   │       ├── 1 (1).png
+	│   │   │       └── ...
+	│   │   └── SMD/
+	│   │       └── ...
+	│   ├── MASD+SBVPI/
+	│   │   ├── MOBIUS/
+	│   │   │   └── ...
+	│   │   ├── SLD/
+	│   │   │   └── ...
+	│   │   └── SMD/
+	│   │       └── ...
+	│   ├── MASD+SMD/
+	│   │   └── ...
+	│   ├── SBVPI/
+	│   │   └── ...
+	│   └── SMD/
+	│       └── ...
+	└── Segmentator/
+	    └── ...
 
 The directory `/path/to/ground/truth/` should contain the ground truth information bundled with the evaluation datasets. It should contain a subdirectory for each evaluation dataset (in our case `MOBIUS`, `SLD`, `SMD`). Each of these should contain the subfolder `Images` (containing the raw RGB images of the dataset) and `Masks` (containing the black-and-white sclera masks). All the files in `/path/to/ground/truth/` should have a corresponding entry in each of the `Predictions` and `Binarised` folders of all of your models in `/path/to/model/results/`, otherwise the evaluation cannot be executed fairly and an error will be reported.
 
