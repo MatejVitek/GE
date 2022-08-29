@@ -51,7 +51,7 @@ from statistics import harmonic_mean
 # Constants
 ATTR_EXP = 'colour', 'light', 'phone', 'gaze'#, ('light', 'phone')  # What to run attribute-based bias experiments on
 FIG_EXTS = 'pdf',# 'png', 'svg', 'eps'  # Which formats to save figures to
-CMAP = plt.cm.plasma  # Colourmap to use in figures
+CMAP = truncate_colourmap(plt.cm.plasma, end=.8)  # Colourmap to use in figures
 MARKERS = 'osP*Xv^<>p1234'
 ZOOMED_LIMS = .6, .95  # Axis limits of zoomed-in P/R curves
 model_complexity = {
