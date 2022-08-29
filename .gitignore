@@ -1,7 +1,9 @@
 /Results/
 
-# Ignore any VSCode folders
+# Ignore any VSCode files and folders
 .vscode/
+*.code-workspace
+
 
 # SLURM files
 *.sh
